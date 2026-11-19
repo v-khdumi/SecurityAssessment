@@ -10,9 +10,11 @@ import zipfile
 import zlib
 from datetime import date
 
-MAX_ZIP = 24 * 1024 * 1024
-MAX_MEMBER = 12 * 1024 * 1024
-MAX_MEMBERS = 400
+MIB = 1024 * 1024
+MAX_ZIP = 512 * MIB
+MAX_MEMBER = 32 * MIB
+MAX_CONFIG_BYTES = 64 * MIB
+MAX_MEMBERS = 4_000
 MAX_ROWS = 60_000
 MEMBERS = {
     "assessment-v1.json", "authorizationPolicy.json", "authenticationMethodsPolicy.json",
@@ -286,14 +288,17 @@ def project_inventory(inputs, key):
             overlap, sorted(omitted), suggestions)
 
 
-def read_archive(blob):
-    if not blob or len(blob) > MAX_ZIP:
-        raise EvidenceError("The ZIP archive is missing or exceeds 24 MiB.")
+def read_archive(source):
+    file = io.BytesIO(source) if isinstance(source, bytes) else source
+    size = file.seek(0, io.SEEK_END)
+    if not 0 < size <= MAX_ZIP:
+        raise EvidenceError(f"Upload a ZIP no larger than {MAX_ZIP // MIB} MiB. For larger exports, split by assessment scope.")
+    file.seek(0)
     try:
-        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        with zipfile.ZipFile(file) as archive:
             infos = archive.infolist()
             if len(infos) > MAX_MEMBERS:
-                raise EvidenceError("The ZIP archive exceeds 400 entries.")
+                raise EvidenceError(f"The ZIP exceeds {MAX_MEMBERS:,} entries. Repackage only the required configuration files.")
             accepted = {}
             skipped = 0
             for entry in infos:
@@ -305,12 +310,13 @@ def read_archive(blob):
                 if entry.filename in accepted:
                     raise EvidenceError("The ZIP archive contains duplicate configuration files.")
                 mode = entry.external_attr >> 16
-                if (entry.file_size > MAX_MEMBER or entry.flag_bits & 1 or stat.S_ISLNK(mode) or
-                        entry.file_size > max(1, entry.compress_size) * 200):
-                    raise EvidenceError("A configuration entry is encrypted, oversized, or unsafe.")
+                if entry.file_size > MAX_MEMBER:
+                    raise EvidenceError(f"A configuration file exceeds {MAX_MEMBER // MIB} MiB uncompressed. Split by assessment scope.")
+                if entry.flag_bits & 1 or stat.S_ISLNK(mode) or entry.file_size > max(1, entry.compress_size) * 200:
+                    raise EvidenceError("A configuration entry is encrypted or unsafe to expand.")
                 accepted[entry.filename] = entry
-            if sum(entry.file_size for entry in accepted.values()) > MAX_ZIP:
-                raise EvidenceError("The configuration metadata exceeds 24 MiB.")
+            if sum(entry.file_size for entry in accepted.values()) > MAX_CONFIG_BYTES:
+                raise EvidenceError(f"Configuration files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
             config = {}
             for name, entry in accepted.items():
                 with archive.open(entry) as stream:

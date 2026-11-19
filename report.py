@@ -203,7 +203,11 @@ def render(tables, timestamp, summary):
     nav, options, panels = [], [], []
     priorities = "".join(f'<li>{badge(p["severity"])}<strong>{esc(p["title"])}</strong> '
                          f'· <code>{p["affected"]}</code> affected<p>{esc(p["action"])}</p></li>' for p in summary["priority"])
-    overview = f"""<div class="metrics">
+    executive = summary.get("executive", [])
+    narrative = "".join(f"<p><strong>{esc(topic)}:</strong> {esc(detail)}</p>" for topic, detail in executive)
+    if narrative:
+        narrative = f'<article><h3>Executive summary</h3>{narrative}</article>'
+    overview = f"""{narrative}<div class="metrics">
 <div class="metric"><b>{summary["high"]}</b>High-priority findings</div>
 <div class="metric"><b>{summary["findings"]}</b>Total findings</div>
 <div class="metric"><b>{summary["resources"]}</b>Resources observed</div>
@@ -220,6 +224,8 @@ def render(tables, timestamp, summary):
             nav.append(f'<a class="jump" href="#{section_id}">{esc(area)}</a>')
         content = [overview] if index == 0 else []
         for slug, title, headers, data, note in rows:
+            if slug == "executive-summary":
+                continue  # Rendered as prose above; the table remains available in CSV.
             search = f'filter-{index}-{slug}'
             description = f"<p>{esc(note)}</p>" if note else ""
             if not data:
@@ -249,7 +255,6 @@ def render(tables, timestamp, summary):
             else:
                 content.append(f'<article{" data-filter" if data else ""}><h3>{esc(title)}</h3>{panel}</article>')
         panels.append(f'<section id="{section_id}"{" hidden" if index else ""}><h2 tabindex="-1">{esc(area)}</h2>{"".join(content)}</section>')
-    notice = ('<p class="notice"><strong>Synthetic sample:</strong> This report does not represent a real tenant.</p>' if summary["sample"] else "")
     csp = f"default-src 'none'; script-src 'sha256-{hash_source(SCRIPT)}'; style-src 'sha256-{hash_source(STYLE)}'; base-uri 'none'; form-action 'none'"
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -262,4 +267,4 @@ def render(tables, timestamp, summary):
 <p>Audience: assessment team, authorized owners, DPO, and legal team · <code>{timestamp.isoformat(timespec='seconds')}</code></p>
 </div></header><nav aria-label="Report sections"><div class="shell navigation">{"".join(nav)}
 <label class="menu"><span class="section-nav-label">Report section</span><select id="section-menu">{"".join(options)}</select></label>
-</div></nav><main>{notice}{"".join(panels)}</main><script>{SCRIPT}</script></body></html>"""
+</div></nav><main>{"".join(panels)}</main><script>{SCRIPT}</script></body></html>"""

@@ -11,11 +11,11 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 from app import AssessmentServer, ConnectionSetup
+from archive_fixture import FILES as REPORT_FIXTURE
 import build
 from controls import RULES
-from evidence import EvidenceError, prowler_config, read_archive
-from azure_collect import CollectionLogin
-from foundry_agents import FoundryError, ModelConnection, assess_evidence, invoke
+from evidence import MAX_ZIP, MIB, EvidenceError, prowler_config, read_archive
+from foundry_agents import FoundryError, FoundryReceipt, ModelConnection, assess_evidence, invoke
 
 SUB = "4c97b582-9b26-42cd-97f1-e3ca95eadf90"
 MODEL = ModelConnection("https://synthetic.openai.azure.com", "review-test", "synthetic-fixture-key-only")
@@ -190,10 +190,13 @@ class FoundryProtocolTests(unittest.TestCase):
                     invoke(MODEL, "posture", evidence)
 
     @staticmethod
-    def response(decisions):
-        message = {"output": [{"type": "message", "role": "assistant", "content": [
+    def response(decisions, **metadata):
+        message = {"status": "completed", "output": [{"type": "message", "role": "assistant", "content": [
             {"type": "output_text", "text": json.dumps({"decisions": decisions})}]}]}
-        return io.BytesIO(json.dumps(message).encode())
+        response = io.BytesIO(json.dumps({**message, **metadata}).encode())
+        response.status = 200
+        response.headers = {"apim-request-id": "d540eb78-ac1a-4cfb-a5af-dd929c9753b7"}
+        return response
 
     def test_api_key_mode_uses_the_deployment_without_cli(self):
         requests = []
@@ -203,21 +206,35 @@ class FoundryProtocolTests(unittest.TestCase):
             rows = json.loads(payload["input"][0]["content"])
             requests.append((request, payload))
             code = "CHANGE" if "Agent: Security Posture." in payload["instructions"] else "EVIDENCE"
-            return self.response([[row["id"], "finding", "Low", code] for row in rows])
+            return self.response([[row["id"], "finding", "Low", code] for row in rows],
+                                 model="gpt-4.1", id="resp_test123456789",
+                                 usage={"input_tokens": 203, "output_tokens": 48})
 
         evidence = {"posture": [{"id": 1, "control": "APP-HTTPS", "observed": False}],
                     "compliance": [{"id": 2, "control": "ENTRA-CA-REPORT", "observed": True}]}
         with patch("foundry_agents.build_opener") as opener:
             opener.return_value.open.side_effect = fake_open
-            decisions, _ = assess_evidence(MODEL, evidence)
+            decisions, _, receipts = assess_evidence(MODEL, evidence)
         self.assertEqual(decisions, {1: ("finding", "Low", "CHANGE"), 2: ("finding", "Low", "EVIDENCE")})
         self.assertEqual(len(requests), 2)
+        self.assertEqual(len(receipts), len(requests))
+        for receipt in receipts:
+            self.assertEqual((receipt.provider_model, receipt.response_id), ("gpt-4.1", "resp_test123456789"))
+            self.assertEqual(receipt.request_id, "d540eb78-ac1a-4cfb-a5af-dd929c9753b7")
+            self.assertEqual((receipt.input_tokens, receipt.output_tokens, receipt.evidence_patterns), (203, 48, 1))
         for request, payload in requests:
             self.assertEqual(request.full_url, MODEL.endpoint + "/openai/v1/responses")
             self.assertEqual({name.lower(): value for name, value in request.header_items()}["api-key"], MODEL.api_key)
             self.assertNotIn(MODEL.api_key, request.data.decode())
             self.assertEqual(payload["model"], "review-test")
             self.assertFalse(payload["store"])
+
+    def test_incomplete_response_does_not_produce_a_receipt(self):
+        evidence = [{"id": 1, "control": "APP-HTTPS", "observed": False}]
+        with patch("foundry_agents.build_opener") as opener:
+            opener.return_value.open.return_value = self.response([[1, "no_finding", None, None]], status="incomplete")
+            with self.assertRaisesRegex(FoundryError, "completed assessment response"):
+                invoke(MODEL, "posture", evidence)
 
 
 class LocalAppTests(unittest.TestCase):
@@ -246,19 +263,19 @@ class LocalAppTests(unittest.TestCase):
     @staticmethod
     def no_findings(_, batches, __):
         return ({row["id"]: ("no_finding", None, None) for rows in batches.values() for row in rows},
-                {"posture": "Foundry assessed supported evidence."})
+                {"posture": "Foundry assessed supported evidence."}, [])
 
-    def test_authentication_prompt_after_assessment_consent(self):
-        self.server.setup = ConnectionSetup(SUB, MODEL)
+    def test_ui_rejects_live_collection_requests(self):
+        self.server.setup = ConnectionSetup(MODEL)
         headers = {**self.headers, "X-Assessment-Consent": "configuration-only", "X-Foundry-Consent": "minimized-configuration",
                    "X-Azure-Consent": "readonly-config",
                    "X-Setup-Revision": "0"}
-        with patch("azure_collect.collect", side_effect=CollectionLogin("No usable session.")), patch("app.assess_evidence") as ai:
-            status, body = self.request("POST", self.prefix + "assess", self.archive, headers)
+        with patch("azure_collect.collect") as azure, patch("app.assess_evidence") as ai:
+            status, body = self.request("POST", self.prefix + "assess", headers=headers)
             ai.assert_not_called()
-        self.assertEqual(status, 409)
-        self.assertEqual(json.loads(body)["login"], "Azure")
-        self.assertEqual(json.loads(body)["tenant"], SUB)
+            azure.assert_not_called()
+        self.assertEqual(status, 400)
+        self.assertIn("uploaded ZIP files only", json.loads(body)["error"])
         self.assertEqual(list(self.server.output.iterdir()), [])
 
     def test_http_consent_and_report_download(self):
@@ -283,14 +300,12 @@ class LocalAppTests(unittest.TestCase):
 
     def test_readiness_and_invalid_zip_never_invoke_cloud(self):
         headers = {**self.headers, "X-Assessment-Consent": "configuration-only", "X-Foundry-Consent": "minimized-configuration",
-                   "X-Azure-Consent": "readonly-config", "X-Setup-Revision": "0"}
-        self.server.pilot_subscription = SUB
-        self.server.setup = ConnectionSetup(SUB, MODEL)
+                   "X-Setup-Revision": "0"}
+        self.server.setup = ConnectionSetup(MODEL)
         with patch("app.assess_evidence") as foundry, patch("azure_collect.collect") as azure:
             status, body = self.request("GET", self.prefix + "readiness")
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(body), {"azure_configured": True, "foundry_configured": True,
-                                                "revision": 0, "single_subscription": True})
+            self.assertEqual(json.loads(body), {"foundry_configured": True, "revision": 0, "max_zip_bytes": MAX_ZIP})
             self.assertNotIn(SUB.encode(), body)
             status, _ = self.request("POST", self.prefix + "assess", b"not a zip", headers)
             self.assertEqual(status, 422)
@@ -341,7 +356,8 @@ class LocalAppTests(unittest.TestCase):
         headers = {**self.headers, "X-Assessment-Consent": "configuration-only", "X-Foundry-Consent": "minimized-configuration",
                    "X-Setup-Revision": "2"}
         with patch("app.assess_evidence", side_effect=self.no_findings) as foundry:
-            code, _ = self.request("POST", self.prefix + "assess", self.archive, headers)
+            code, _ = self.request("POST", self.prefix + "assess",
+                                   headers={**headers, "Content-Length": str(len(self.archive))})
             self.assertEqual(code, 409)
             foundry.assert_not_called()
             code, reply = self.request("POST", self.prefix + "assess", self.archive, {**headers, "X-Setup-Revision": "3"})
@@ -355,49 +371,40 @@ class LocalAppTests(unittest.TestCase):
         self.assertNotIn("get-access-token", report)
         self.assertIn("Azure OpenAI Responses", report)
 
-    def test_sample_download_and_offline_run_do_not_use_configured_services(self):
+    def test_no_bundled_sample_or_empty_assessment(self):
         route = self.prefix + "sample"
-        self.server.setup = ConnectionSetup(SUB, MODEL)
-        status, blob = self.request("GET", route)
-        self.assertEqual(status, 200)
-        config, skipped = read_archive(blob)
-        self.assertEqual(skipped, 0)
-        self.assertEqual(set(config), {"authorizationPolicy.json", "authenticationMethodsPolicy.json",
-                                       "conditionalAccessPolicies.json", "assessment-v1.json", "prowler-summary.json"})
-        self.assertEqual(len(config["conditionalAccessPolicies.json"]["value"]), 6)
-        self.assertEqual(self.request("POST", route, headers=self.headers)[0], 403)
-        headers = {**self.headers, "X-Assessment-Consent": "configuration-only"}
+        self.server.setup = ConnectionSetup(MODEL)
+        headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
+                   "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0", "Content-Length": "0"}
+        self.assertEqual(self.request("GET", route)[0], 404)
         with patch("app.assess_evidence") as foundry, patch("azure_collect.collect") as azure:
-            status, body = self.request("POST", route, headers={**headers, "Content-Length": str(len(self.archive))})
+            self.assertEqual(self.request("POST", route, headers=headers)[0], 403)
+            status, body = self.request("POST", self.prefix + "assess", headers=headers)
             self.assertEqual(status, 400)
-            status, body = self.request("POST", route, headers={**headers, "Content-Length": "0"})
-            self.assertEqual(status, 200, body)
+            self.assertIn("nonempty configuration ZIP", json.loads(body)["error"])
             foundry.assert_not_called()
             azure.assert_not_called()
-        result = json.loads(body)
-        self.assertEqual((result["resources"], result["findings"], result["high"]), (12, 12, 1))
-        report = (self.server.output / result["snapshot"] / "report.html").read_text("utf-8")
-        self.assertIn("Not a real assessment; no cloud calls were made", report)
-        self.assertIn("Supplied page", report)
-        self.assertIn("Synthetic sample:", report)
-        self.assertEqual(result["priority"][0]["severity"], "High")
-        self.assertLess(result["controls_with_evidence"], result["available_controls"])
-        self.assertEqual(result["graph_observations"], 14)
-        self.assertIn('data-filter-item data-severity="High"', report)
+        self.assertEqual(list(self.server.output.iterdir()), [])
 
-    def test_exact_sample_is_labeled_and_not_combined_with_live_evidence(self):
-        blob = build.SAMPLE.read_bytes()
-        self.server.setup = ConnectionSetup(SUB, MODEL)
-        base = {**self.headers, "X-Assessment-Consent": "configuration-only", "X-Foundry-Consent": "minimized-configuration",
-                "X-Setup-Revision": "0"}
-        with patch("azure_collect.collect") as azure, patch("app.assess_evidence", side_effect=self.no_findings) as ai:
-            status, _ = self.request("POST", self.prefix + "assess", blob, {**base, "X-Azure-Consent": "readonly-config"})
-            self.assertEqual(status, 400)
-            azure.assert_not_called()
-            ai.assert_not_called()
-            status, body = self.request("POST", self.prefix + "assess", blob, base)
+    def test_upload_larger_than_24_mib_and_excessive_upload_rejection(self):
+        blob = archive(**{"assessment-v1.json": json.dumps(CONFIG) + " " * (25 * MIB), "ignored.bin": "not opened"})
+        self.server.setup = ConnectionSetup(MODEL)
+        headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
+                   "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0"}
+        with patch("app.assess_evidence", side_effect=self.no_findings) as foundry:
+            status, body = self.request("POST", self.prefix + "assess",
+                                        headers={**headers, "Content-Length": str(MAX_ZIP + 1)})
+            self.assertEqual(status, 413)
+            self.assertIn("512 MiB", json.loads(body)["error"])
+            foundry.assert_not_called()
+            status, body = self.request("POST", self.prefix + "assess", blob, headers)
             self.assertEqual(status, 200, body)
-            self.assertTrue(json.loads(body)["sample"])
+            foundry.assert_called_once()
+        run = json.loads(body)
+        self.assertEqual((run["resources"], run["skipped"], run["eligible_files"]), (1, 1, 1))
+        self.assertEqual([entry.name for entry in self.server.output.iterdir()], [run["snapshot"]])
+        report = (self.server.output / run["snapshot"] / "report.html").read_text("utf-8")
+        self.assertIn("Foundry reported no findings in the submitted configuration", report)
 
     def test_foundry_alone_produces_ui_findings_from_minimized_zip_evidence(self):
         blob = archive(**{"assessment-v1.json": CONFIG, "authorizationPolicy.json": {
@@ -417,7 +424,9 @@ class LocalAppTests(unittest.TestCase):
                 self.assertNotIn(secret, request.data.decode())
             decisions = [[row["id"], "finding", "High", "EVIDENCE"] if row["control"] == "ENTRA-GUEST-INVITES"
                          else [row["id"], "no_finding", None, None] for row in json.loads(payload["input"][0]["content"])]
-            return FoundryProtocolTests.response(decisions)
+            return FoundryProtocolTests.response(decisions, id="resp_testlocalassessment", model="gpt-4.1",
+                                                 usage={"input_tokens": 120, "output_tokens": 11},
+                                                 extra=MODEL.api_key)
 
         with patch("build.findings", side_effect=AssertionError("Local rule engine must not run")), \
                 patch("foundry_agents.build_opener") as opener:
@@ -428,14 +437,42 @@ class LocalAppTests(unittest.TestCase):
         self.assertEqual(outgoing["ENTRA-GUEST-INVITES"], "everyone")
         result = json.loads(body)
         self.assertEqual((result["analysis_mode"], result["findings"], result["high"]), ("Foundry", 1, 1))
+        self.assertEqual(result["foundry_requests"], 2)
         with (self.server.output / result["snapshot"] / "csv" / "findings" / "details.csv").open(
                 newline="", encoding="utf-8") as file:
             [finding] = list(csv.DictReader(file))
         self.assertEqual(finding["Key"], "ENTRA-GUEST-INVITES")
         self.assertIn("Foundry severity: High", finding["Severity rationale"])
+        folder = self.server.output / result["snapshot"]
+        report = (folder / "report.html").read_text("utf-8")
+        self.assertIn("Executive summary", report)
+        self.assertIn("Foundry identified 1 finding (1 high, 0 medium, 0 low)", report)
+        self.assertIn("Start with ENTRA-GUEST-INVITES", report)
+        self.assertIn("The total also includes Entra policy findings.", report)
+        self.assertTrue((folder / "csv" / "summary" / "executive-summary.csv").is_file())
+        with (folder / "csv" / "method-and-limits" / "foundry-receipts.csv").open(newline="", encoding="utf-8") as file:
+            receipts = list(csv.DictReader(file))
+        self.assertEqual({row["Agent"] for row in receipts}, {"Security Posture", "Compliance"})
+        self.assertTrue(all(row["Model reported by Azure"] == "gpt-4.1" and row["Input tokens"] == "120" for row in receipts))
+        self.assertIn("resp_testlocalassessment", report)
+        self.assertNotIn(MODEL.api_key, report)
 
-    def test_sample_system_has_matching_resource_and_finding_counts(self):
-        tables, _, _ = build.dataset(build.SAMPLE.read_bytes(), None, {}, {},
+    def test_repeated_settings_are_sent_once_and_accounted_for_per_resource(self):
+        blob = archive(**{"assessment-v1.json": {"schema_version": 1, "resources": [
+            {"id": f"{RESOURCE}-{index}", "type": "microsoft.web/sites", "httpsOnly": False} for index in range(600)
+        ]}})
+
+        def assess(batches):
+            [row] = batches["posture"]
+            return {row["id"]: ("finding", "Medium", "CHANGE")}, {}, []
+
+        _, summary, _ = build.dataset(blob, None, {}, {}, datetime.now(timezone.utc), b"x" * 32, {},
+                                      review_mode="model", assess=assess)
+        self.assertEqual((summary["model_patterns"], summary["model_evidence_rows"], summary["findings"]), (1, 600, 600))
+        self.assertIn("affecting 600 of 600", summary["executive"][0][1])
+
+    def test_uploaded_system_has_matching_resource_and_finding_counts(self):
+        tables, _, _ = build.dataset(archive(**REPORT_FIXTURE), None, {}, {},
                                      datetime(2026, 11, 19, tzinfo=timezone.utc), b"x" * 32, {})
         [system_risk] = tables["Systems"][:1]
         self.assertEqual(sorted(row[3] for row in system_risk[3]), [3, 4, 5])
@@ -443,9 +480,9 @@ class LocalAppTests(unittest.TestCase):
         self.assertEqual((orders[3], orders[6:9]), (5, (1, 5, 2)))
 
     def test_findings_include_control_specific_plans_and_distinguish_context_from_missing_evidence(self):
-        blob = build.SAMPLE.read_bytes()
+        blob = archive(**REPORT_FIXTURE)
         with tempfile.TemporaryDirectory() as output:
-            snapshot, summary = build.run(output, blob, review_mode="sample")
+            snapshot, summary = build.run(output, blob)
             directory = Path(output, snapshot)
             with (directory / "csv" / "findings" / "details.csv").open(newline="", encoding="utf-8") as file:
                 findings = {row["Key"]: row for row in csv.DictReader(file)}
@@ -513,17 +550,20 @@ class LocalAppTests(unittest.TestCase):
                 raise FoundryError("The test did not release this agent.")
             if role == "compliance":
                 raise FoundryError("Simulated unavailable deployment.")
-            return {row["id"]: ("finding", "Medium", "CHANGE") for row in rows}
+            decisions = {row["id"]: ("finding", "Medium", "CHANGE") for row in rows}
+            receipt = FoundryReceipt("Security Posture", "2026-11-19T13:00:00+00:00", 10, 200,
+                                     len(rows), None, None, None, None, None)
+            return decisions, receipt
 
         client = http.client.HTTPConnection(self.server.hostname, timeout=5)
         with patch("foundry_agents.invoke", side_effect=finish_agent):
             try:
-                client.request("POST", self.prefix + "assess", build.SAMPLE.read_bytes(), headers)
+                client.request("POST", self.prefix + "assess", archive(**REPORT_FIXTURE), headers)
                 response = client.getresponse()
                 self.assertTrue(response.getheader("Content-Type").startswith("application/x-ndjson"))
-                events = [json.loads(response.readline()) for _ in range(4)]
+                events = [json.loads(response.readline()) for _ in range(5)]
                 self.assertEqual([(event["stage"], event["state"]) for event in events],
-                                 [("evidence", "running"), ("evidence", "done"),
+                                 [("upload", "done"), ("evidence", "running"), ("evidence", "done"),
                                   ("posture", "running"), ("compliance", "running")])
                 allow_response.set()
                 remaining = [json.loads(line) for line in response.read().splitlines()]
@@ -539,7 +579,7 @@ class LocalAppTests(unittest.TestCase):
         headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
                    "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0"}
         with patch("app.assess_evidence", side_effect=FoundryError("Compliance agent: test failure")) as review:
-            status, body = self.request("POST", route, self.archive, headers)
+            status, body = self.request("POST", route, headers={**headers, "Content-Length": str(len(self.archive))})
             self.assertEqual(status, 400)
             self.assertIn("API key in Setup", json.loads(body)["error"])
             review.assert_not_called()

@@ -15,14 +15,13 @@ import stat
 import sys
 
 from controls import GRAPH_RULES, GUIDANCE, NIS2, QUESTIONS, RULES, WEB, findings
-from evidence import (MAX_ZIP, PROWLER_CATALOGS, TYPES, EvidenceError, graph_config,
+from evidence import (PROWLER_CATALOGS, TYPES, EvidenceError, graph_config,
                       project_costs, project_functions, project_inventory, project_posture, prowler_config, read_archive)
 from microsoft_guidance import FINDING_REFERENCES, SECTION_REFERENCES, entra_review, reference_rows, url
 from report import render
 from tab_review import CONFIG_REVIEW, REVIEW_PLANS
 
 BASE = Path(__file__).resolve().parent
-SAMPLE = BASE / "samples" / "azure-graph-sample.zip"
 SNAPSHOT = re.compile(r"\d{8}T\d{6}Z-[a-f0-9]{10}")
 EMAIL = re.compile(r"[^\s\"'<>,;()=@]+@[\w-]+(?:\.[\w-]+)*", re.I)
 RETENTION_DAYS = 30
@@ -89,10 +88,6 @@ def csv_data(columns, records):
     return assure_safe(buf.getvalue())
 
 
-def is_sample_archive(blob):
-    return bool(blob and SAMPLE.is_file() and len(blob) == SAMPLE.stat().st_size and blob == SAMPLE.read_bytes())
-
-
 def graph_evidence(graph):
     states = {(source, field.split(" · ", 1)[0]): value for source, field, value in graph}
     settings = {}
@@ -118,6 +113,7 @@ def graph_evidence(graph):
 
 def model_evidence(resources, graph):
     ledger = {}
+    patterns = {}
     batches = {"posture": [], "compliance": []}
     scopes = (("posture", RULES, resources), ("compliance", GRAPH_RULES, [graph_evidence(graph)]))
     for role, rules, scope in scopes:
@@ -135,10 +131,14 @@ def model_evidence(resources, graph):
                     accepted is not bool and (not isinstance(value, str) or value not in accepted)
                 ):
                     raise EvidenceError("A projected evidence value is not in the approved Foundry schema.")
-                anchor = len(ledger) + 1
-                ledger[anchor] = (rule, resource, role)
-                batches[role].append({"id": anchor, "control": rule.key, "setting": field, "observed": value,
-                                      "finding_when": expected, "typical_severity": rule.severity})
+                pattern = role, rule.key, value
+                if pattern not in patterns:
+                    anchor = len(ledger) + 1
+                    patterns[pattern] = anchor
+                    ledger[anchor] = []
+                    batches[role].append({"id": anchor, "control": rule.key, "setting": field, "observed": value,
+                                          "finding_when": expected, "typical_severity": rule.severity})
+                ledger[patterns[pattern]].append((rule, resource, role))
     return batches, ledger
 
 
@@ -180,6 +180,7 @@ def finding_record(entry, count, reviews, anonymous_functions, model_selected):
 
 def dataset(blob, live, reviews, review_status, timestamp, key, assignments, prepared_archive=None,
             review_mode="off", assess=None):
+    uploaded = blob is not None or prepared_archive is not None
     config, skipped = prepared_archive if prepared_archive is not None else (
         read_archive(blob) if blob is not None else ({}, 0))
     sources = []
@@ -211,28 +212,32 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             resource["evidence_sources"]["anonymousHttpEnabled"] = "ZIP — function configuration"
     model_selected = review_mode == "model"
     model_rows = []
+    model_pattern_count = 0
+    foundry_receipts = []
     if model_selected:
         if assess is None:
             raise EvidenceError("A Foundry assessment requires model decisions; no local fallback is permitted.")
         batches, ledger = model_evidence(resources, graph)
-        decisions, review_status = assess(batches)
+        decisions, review_status, foundry_receipts = assess(batches)
         if decisions.keys() != ledger.keys():
             raise EvidenceError("Foundry did not return results covering the submitted evidence.")
         reviews = {"posture": {}, "compliance": {}}
+        model_pattern_count = len(ledger)
         active = []
-        for anchor, (rule, resource, role) in ledger.items():
+        for anchor, entries in ledger.items():
             verdict, severity, question = decisions[anchor]
-            model_rows.append((rule.key, resource["id"], rule.field, resource["properties"][rule.field],
-                               resource["evidence_sources"].get(rule.field, resource["source"]), verdict, severity))
-            if verdict != "finding":
-                continue
-            group = resource["group"]
-            unassigned = "Entra policy (not a resource group)" if role == "compliance" else group or "Unassigned"
-            system, likely = effective_assignments.get(group, (unassigned, None))
-            raised = likely is True and severity != "High"
-            level = {"Low": "Medium", "Medium": "High"}[severity] if raised else severity
-            reviews[role][resource["id"], rule.key] = question
-            active.append((rule, resource, system, level, raised))
+            for rule, resource, role in entries:
+                model_rows.append((rule.key, resource["id"], rule.field, resource["properties"][rule.field],
+                                   resource["evidence_sources"].get(rule.field, resource["source"]), verdict, severity))
+                if verdict != "finding":
+                    continue
+                group = resource["group"]
+                unassigned = "Entra policy (not a resource group)" if role == "compliance" else group or "Unassigned"
+                system, likely = effective_assignments.get(group, (unassigned, None))
+                raised = likely is True and severity != "High"
+                level = {"Low": "Medium", "Medium": "High"}[severity] if raised else severity
+                reviews[role][resource["id"], rule.key] = question
+                active.append((rule, resource, system, level, raised))
     else:
         active = findings(resources, effective_assignments)
     active.sort(key=lambda x: (PRIORITY[x[3]], x[0].key, x[1]["id"]))
@@ -245,12 +250,10 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
 
     counts = Counter(level for _, _, _, level, _ in active)
     occurrences = Counter((rule.key, level) for rule, _, _, level, _ in active)
-    priority = {}
-    for rule, _, _, level, _ in active:
-        priority.setdefault((rule.key, level), {"title": rule.title, "severity": level, "key": rule.key,
-                                               "affected": occurrences[rule.key, level], "action": rule.action})
-        if len(priority) == 3:
-            break
+    by_key = {rule.key: rule for rule, *_ in active}
+    ranked = sorted(occurrences, key=lambda pair: (PRIORITY[pair[1]], -occurrences[pair], pair[0]))
+    priority = [{"title": by_key[key].title, "severity": level, "key": key,
+                 "affected": occurrences[key, level], "action": by_key[key].action} for key, level in ranked[:3]]
     eligible = Counter()
     observed = Counter()
     for resource in resources:
@@ -264,10 +267,12 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     summary = {"resources": len(resources), "findings": len(active), "high": counts["High"],
                "skipped": skipped, "eligible_files": len(config), "graph_observations": len(graph),
                "controls_with_evidence": len(observed), "available_controls": len(RULES),
-               "priority": list(priority.values()), "sample": review_mode == "sample" or is_sample_archive(blob),
+               "priority": priority,
                "has_evidence": has_evidence, "live_azure": live is not None,
                "analysis_mode": "Foundry" if model_selected else "Local rules",
-               "model_evidence_rows": len(model_rows), "model_insufficient": sum(row[-2] == "insufficient" for row in model_rows)}
+               "model_evidence_rows": len(model_rows), "model_patterns": model_pattern_count,
+               "foundry_requests": len(foundry_receipts),
+               "model_insufficient": sum(row[-2] == "insufficient" for row in model_rows)}
     attention = [
         ("Breach status", "Not assessed. These sources neither confirm nor rule out an incident."),
         ("Resources with metadata", len(resources)),         ("Findings (control/evidence pairs)", len(active)),
@@ -278,13 +283,35 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         ("Graph configuration observations", len(graph)),
         ("Resource controls with evidence", len(observed)),
     ]
-    if review_mode == "sample":
-        attention.insert(0, ("Demo data", "Synthetic Microsoft Graph examples and fictional Azure resources. Not a real assessment; no cloud calls were made."))
-    elif summary["sample"]:
-        attention.insert(0, ("Demo data", "This ZIP contains synthetic Microsoft Graph examples and fictional Azure resources, not tenant evidence."))
     if not has_evidence:
         attention.append(("Coverage", "No usable configuration evidence. Do not interpret zero findings as a favorable result."))
     add("Summary", "overview", "What needs attention", ("Indicator", "Value"), attention)
+    if model_selected:
+        scope_count = len({resource["id"] for _, resource, _, _, _ in active if resource["type"] != "microsoft.graph"})
+        no_finding = sum(row[-2] == "no_finding" for row in model_rows)
+        missing = sum(eligible.values()) - sum(observed.values())
+        if active:
+            label = "finding" if len(active) == 1 else "findings"
+            headline = (f"Foundry identified {len(active)} {label} ({counts['High']} high, {counts['Medium']} medium, "
+                        f"{counts['Low']} low) affecting {scope_count} of {len(resources)} inventoried Azure resources.")
+            if any(resource["type"] == "microsoft.graph" for _, resource, _, _, _ in active):
+                headline += " The total also includes Entra policy findings."
+            lead = summary["priority"][0]
+            next_step = f"Start with {lead['key']} ({lead['severity']}; {lead['affected']} affected scope entries). {lead['action']}"
+        else:
+            headline = "Foundry reported no findings in the submitted configuration. This does not establish that the tenant is secure."
+            next_step = "Review coverage gaps and confirm the export scope before drawing a conclusion."
+        summary["executive"] = [
+            ("Outcome", headline),
+            ("First action", next_step),
+            ("Scope", f"{len(config)} recognized ZIP files; {skipped} entries not opened. "
+                      f"{len(resources)} Azure resources and {len(graph)} Graph observations were read from the upload."),
+            ("Evidence gaps", f"{no_finding} evidence rows returned no finding; {summary['model_insufficient']} were insufficient. "
+                              f"{missing} resource/control pairs had no supported field in the upload and were not sent."),
+            ("Foundry calls", f"{len(foundry_receipts)} completed responses covering {model_pattern_count} distinct patterns. "
+                              "See Method and limits for request IDs, model metadata, and timings when available."),
+        ]
+        add("Summary", "executive-summary", "Executive summary", ("Topic", "Conclusion"), summary["executive"])
     hits = Counter(rule.key for rule, *_ in active)
     coverage_rows = [(rule.key, rule.title, observed[rule.key], eligible[rule.key] - observed[rule.key], hits[rule.key],
                       "No resources in scope" if not eligible[rule.key] else
@@ -367,7 +394,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     if model_selected:
         add("Findings", "foundry-decisions", "Foundry evidence decisions",
             ("Control", "Evidence scope", "Observed field", "Observed value", "Source", "Model decision", "Model severity"),
-            model_rows, "Decisions are from Foundry. No finding does not mean the service or tenant is secure. "
+            model_rows, "Decisions are from Foundry. Identical control values share the same model decision. "
+            "No finding does not mean the service or tenant is secure. "
             "Imported inventories, costs, and compliance summaries are context, not independent LLM checks.")
     add("Findings", "privacy-fields", "Potentially identifying fields omitted",
         ("Source", "Omitted field", "Action"), ((src, field, "Value omitted. Confirm minimization at the source.")
@@ -463,7 +491,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             ("Identity", "Dedicated Azure CLI account if live collection was approved. The mandate requires Reader at the tenant root; the app does not certify that role."),
             ("Excluded", "Data-plane content, sign-in or audit events, IP addresses, customer data, settings values, names, URLs, and free text from exports."),
             ("Limits", "ARM Reader does not grant access to Entra, data-plane content, separate B2C tenants, or the retired classic admin API."),
-            ("Storage", "The pseudonymized snapshot, HTML, and CSVs remain in the approved local directory. The app does not save the ZIP."),
+            ("Storage", "The pseudonymized snapshot, HTML, and CSVs remain in the approved local directory. "
+                        "A web upload is streamed to a temporary file there and closed after parsing."),
             ("Access", "Assessment team, authorized owners, DPO, and legal team. Use a company-managed device with access controls and encryption."),
             ("Proposed retention", f"{RETENTION_DAYS} days. Delete the snapshot by {release.date().isoformat()}, subject to DPO approval."),
             ("Cloud", "When approved, Foundry receives allowlisted configuration indicators and per-run row numbers. "
@@ -471,7 +500,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             ("DPO", "Confirm retention, access, Article 30 records, and whether an Article 35 DPIA is needed."),
         ))
     add("Method and limits", "input", "Sources and coverage", ("Area", "Status", "Detail"), [
-        ("ZIP", "imported" if blob is not None else "not_collected", "Only recognized configuration entries are opened. Imported inventories are not guaranteed complete."),
+        ("ZIP", "imported" if uploaded else "not_collected", "Only recognized configuration entries are opened. Imported inventories are not guaranteed complete."),
         ("Live Azure inventory", "run" if live is not None else "not_collected", "Requires separate approval."),
         *list((item["area"], item["status"], item["detail"]) for item in (live or {}).get("coverage", [])),
         ("Security Posture review", review_status.get("posture", "Not called"), "Allowlisted Azure evidence only."),
@@ -479,6 +508,15 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     ])
     add("Method and limits", "cross-check", "ARG ↔ ARM reconciliation", ("Resource", "Sources"), overlap,
         "Check coverage status. Differences may reflect indexing delays, child resources, incomplete pagination, or missing access.")
+    if model_selected:
+        add("Method and limits", "foundry-receipts", "Foundry request receipts",
+            ("Agent", "Request start (UTC)", "Round trip (ms)", "HTTP status", "Patterns", "Model reported by Azure",
+             "Azure request ID", "Responses API ID", "Input tokens", "Output tokens"),
+            ((receipt.agent, receipt.requested_at, receipt.duration_ms, receipt.http_status,
+              receipt.evidence_patterns, receipt.provider_model, receipt.request_id, receipt.response_id,
+              receipt.input_tokens, receipt.output_tokens) for receipt in foundry_receipts),
+            "One row per completed request with valid decisions. Metadata not returned by Azure is blank. The provider model "
+            "can differ from the deployment name. Correlate timestamps or request IDs in approved Azure diagnostics when available.")
     audit = list((live or {}).get("audit", []))
     if review_status:
         audit += [f"Azure OpenAI Responses [{role}]: {review_status[role]}" for role in ("posture", "compliance")
@@ -670,8 +708,8 @@ def main():
             print("Snapshot deleted.")
         else:
             with args.zip.open("rb") as file:
-                blob = file.read(MAX_ZIP + 1)
-            snapshot_id, _ = run(args.output, blob=blob)
+                prepared_archive = read_archive(file)
+            snapshot_id, _ = run(args.output, prepared_archive=prepared_archive)
             print(f"Local snapshot: {snapshot_id}")
     except EvidenceError as exc:
         parser.exit(1, f"{exc}\n")

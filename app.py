@@ -4,15 +4,15 @@ import argparse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import os
 from pathlib import Path
 import re
 import secrets
 import stat
+from tempfile import TemporaryFile
 from threading import Lock
 
 import build
-from evidence import MAX_ZIP, EvidenceError, is_guid, read_archive
+from evidence import MAX_ZIP, MIB, EvidenceError, read_archive
 from foundry_agents import FoundryError, ModelConnection, assess_evidence, configuration, model_endpoint
 
 ASSETS = build.BASE / "web"
@@ -20,7 +20,6 @@ ASSETS = build.BASE / "web"
 
 @dataclass(frozen=True)
 class ConnectionSetup:
-    azure_tenant: str = ""
     foundry: ModelConnection | None = None
     revision: int = 0
 
@@ -28,11 +27,11 @@ class ConnectionSetup:
         fields = {}
         if self.foundry:
             fields.update(endpoint=self.foundry.endpoint, deployment=self.foundry.deployment, has_key=True)
-        return {"azure_tenant": self.azure_tenant, "foundry": fields, "revision": self.revision}
+        return {"foundry": fields, "revision": self.revision}
 
     def update(self, payload):
         if not isinstance(payload, dict) or not isinstance(payload.get("foundry"), dict):
-            raise EvidenceError("The setup request must contain Azure and Foundry connection settings.")
+            raise EvidenceError("The setup request must contain Foundry connection settings.")
 
         def text(body, field):
             value = body.get(field, "")
@@ -40,9 +39,6 @@ class ConnectionSetup:
                 raise EvidenceError("A setup field is invalid or too long.")
             return value.strip()
 
-        azure_tenant = text(payload, "azure_tenant")
-        if azure_tenant and not is_guid(azure_tenant):
-            raise EvidenceError("The Azure tenant ID must be a GUID. Leave it blank unless you need live Azure inventory.")
         values = payload["foundry"]
         if "mode" in values:
             raise EvidenceError("Setup has changed. Reload the workspace to use API-key setup.")
@@ -51,24 +47,22 @@ class ConnectionSetup:
         if not api_key and self.foundry and endpoint == self.foundry.endpoint:
             api_key = self.foundry.api_key
         foundry = ModelConnection(endpoint, text(values, "deployment"), api_key)
-        return ConnectionSetup(azure_tenant, foundry, self.revision + 1)
+        return ConnectionSetup(foundry, self.revision + 1)
 
 
 class AssessmentServer(ThreadingHTTPServer):
-    def __init__(self, port, output, pilot_subscription=None):
+    def __init__(self, port, output):
         super().__init__(("127.0.0.1", port), Handler)
         self.output = output
-        self.pilot_subscription = pilot_subscription
         self.hostname = f"127.0.0.1:{self.server_port}"
         self.origin = f"http://{self.hostname}"
         self.session = "/" + secrets.token_urlsafe(24)
         self.lock = Lock()
-        tenant = os.getenv("ASSESSMENT_AZURE_TENANT_ID", "").strip()
         try:
             foundry = configuration()
         except FoundryError:
             foundry = None
-        self.setup = ConnectionSetup(tenant if is_guid(tenant) else "", foundry)
+        self.setup = ConnectionSetup(foundry)
 
     def get_request(self):
         client, address = super().get_request()
@@ -127,22 +121,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "readiness":
             setup = self.server.setup
             self.payload(200, {
-                "azure_configured": bool(setup.azure_tenant),
                 "foundry_configured": setup.foundry is not None,
                 "revision": setup.revision,
-                "single_subscription": self.server.pilot_subscription is not None,
+                "max_zip_bytes": MAX_ZIP,
             })
             return
         if path == "setup":
             self.payload(200, self.server.setup.public_settings())
-            return
-        if path == "sample":
-            try:
-                body = build.SAMPLE.read_bytes()
-            except OSError:
-                self.payload(404, {"error": "The bundled sample is unavailable."})
-                return
-            self.send(200, body, "application/zip", {"Content-Disposition": f'attachment; filename="{build.SAMPLE.name}"'})
             return
         if path in ("", "ui.js", "ui.css", "mandate.txt"):
             asset, kind = {
@@ -176,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path_local()
-        if path not in {"assess", "sample", "setup"} or self.headers.get("Origin") != self.server.origin:
+        if path not in {"assess", "setup"} or self.headers.get("Origin") != self.server.origin:
             self.payload(403, {"error": "Unauthorized local request."})
             return
         if path == "setup":
@@ -185,92 +170,66 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("X-Assessment-Consent") != "configuration-only":
             self.payload(403, {"error": "Confirm the mandate and data categories before running the assessment."})
             return
-        azure_on = self.headers.get("X-Azure-Consent") == "readonly-config"
-        sample = path == "sample"
-        try:
-            raw_length = self.headers.get("Content-Length", "")
-            if not re.fullmatch(r"[0-9]{1,10}", raw_length):
-                raise ValueError
-            length = int(raw_length)
-            if length > MAX_ZIP or self.headers.get("Transfer-Encoding"):
-                raise ValueError
-            if length and self.headers.get("Content-Type") != "application/zip":
-                raise ValueError
-        except ValueError:
-            self.payload(400, {"error": "A ZIP archive of up to 24 MiB is accepted."})
-            return
-        if sample and (length or azure_on or self.headers.get("X-Foundry-Consent")):
-            self.payload(400, {"error": "The offline demo accepts only the bundled sample and does not connect to Azure."})
-            return
-        if not sample and self.headers.get("X-Foundry-Consent") != "minimized-configuration":
+        if self.headers.get("X-Foundry-Consent") != "minimized-configuration":
             self.payload(403, {"error": "Approve sending the listed configuration indicators to your Foundry deployment."})
             return
-        if not sample and not (length or azure_on):
-            self.payload(400, {"error": "Select a ZIP archive or approve live Azure inventory."})
+        if self.headers.get("X-Azure-Consent"):
+            self.payload(400, {"error": "This app assesses uploaded ZIP files only. Reload the workspace to continue."})
+            return
+        raw_length = self.headers.get("Content-Length", "")
+        if not re.fullmatch(r"[0-9]{1,10}", raw_length) or self.headers.get("Transfer-Encoding"):
+            self.payload(400, {"error": "The ZIP upload must have a known file size."})
+            return
+        length = int(raw_length)
+        if length > MAX_ZIP:
+            self.payload(413, {"error": f"The ZIP exceeds {MAX_ZIP // MIB} MiB. Re-export a narrower assessment scope and upload that ZIP."})
+            return
+        if not length or self.headers.get("Content-Type") != "application/zip":
+            self.payload(400, {"error": "Select a nonempty configuration ZIP before starting an assessment."})
             return
         if not self.server.lock.acquire(blocking=False):
             self.payload(409, {"error": "An assessment is already running."})
             return
         try:
-            blob = build.SAMPLE.read_bytes() if sample else self.rfile.read(length) if length else None
-            if length and len(blob) != length:
-                self.payload(400, {"error": "The ZIP transfer was incomplete."})
-                return
             setup = self.server.setup
-            if not sample and self.headers.get("X-Setup-Revision") != str(setup.revision):
+            if self.headers.get("X-Setup-Revision") != str(setup.revision):
                 self.payload(409, {"error": "Connection setup changed. Review the current settings and confirm the assessment again."})
                 return
-            if azure_on and not setup.azure_tenant:
-                self.payload(400, {"error": "Set the Azure tenant ID in Setup before running live collection."})
-                return
             connection = setup.foundry
-            if not sample and connection is None:
+            if connection is None:
                 self.payload(400, {"error": "Set the Azure OpenAI endpoint, deployment, and API key in Setup."})
                 return
-            if azure_on and build.is_sample_archive(blob):
-                self.payload(400, {"error": "The sample ZIP contains fictional resources. Uncheck live Azure inventory to test it."})
-                return
-            if self.headers.get("Accept") == "application/x-ndjson":
-                self.send_response(200)
-                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.streaming = True
-                self.close_connection = True
-            self.progress("evidence", "running", "Reading recognized configuration files locally.")
-            prepared_archive = read_archive(blob) if blob is not None else None
-            self.progress("evidence", "done", "Archive validated." if blob is not None else "No ZIP supplied.")
-            live = None
-            if azure_on:
-                from azure_collect import CollectionError, CollectionLogin, collect
-
-                self.progress("azure", "running", "Reading approved Azure configuration.")
-                try:
-                    live = collect(setup.azure_tenant, subscription_id=self.server.pilot_subscription)
-                except CollectionLogin as exc:
-                    self.progress("azure", "failed", "Azure CLI sign-in required.")
-                    self.payload(409, {"login": "Azure", "error": str(exc), "tenant": setup.azure_tenant})
-                    return
-                except CollectionError as exc:
-                    self.progress("azure", "failed", str(exc))
-                    self.payload(422, {"error": str(exc)})
-                    return
-                self.progress("azure", "done", "Collection finished; the report shows actual coverage.")
+            with TemporaryFile(dir=build.output_root(self.server.output)) as upload:
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(MIB, remaining))
+                    if not chunk:
+                        self.payload(400, {"error": "The ZIP transfer was incomplete. Select the file and upload it again."})
+                        return
+                    upload.write(chunk)
+                    remaining -= len(chunk)
+                if self.headers.get("Accept") == "application/x-ndjson":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.streaming = True
+                    self.close_connection = True
+                self.progress("upload", "done", "ZIP received on this device.")
+                self.progress("evidence", "running", "Reading recognized configuration files locally.")
+                prepared_archive = read_archive(upload)
+            self.progress("evidence", "done", "Archive validated. The temporary upload is closed.")
             status = {}
 
             def assess(batches):
                 nonlocal status
-                decisions, status = assess_evidence(connection, batches, self.progress)
+                decisions, status, receipts = assess_evidence(connection, batches, self.progress)
                 self.progress("report", "running", "Writing the Foundry decisions to the local report.")
-                return decisions, status
+                return decisions, status, receipts
 
-            if sample:
-                self.progress("report", "running", "Evaluating synthetic evidence with local demo rules.")
-            snapshot, summary = build.run(self.server.output, blob, live,
-                                          prepared_archive=prepared_archive, review_mode="sample" if sample else "model",
-                                          assess=None if sample else assess)
+            snapshot, summary = build.run(self.server.output, prepared_archive=prepared_archive, review_mode="model", assess=assess)
             self.progress("report", "done", "Report and CSVs saved locally.")
             self.payload(200, {"snapshot": snapshot, **summary,
                                "foundry_status": status, "preview": f"report/{snapshot}",
@@ -315,13 +274,10 @@ def main():
     parser = argparse.ArgumentParser(description="Azure Tenant Assessment, accessible on loopback only.")
     parser.add_argument("--output", type=Path, required=True, help="Existing, company-approved local directory")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--subscription-id", help="Limit live collection to a single pilot subscription")
     args = parser.parse_args()
-    if args.subscription_id and not is_guid(args.subscription_id):
-        parser.error("--subscription-id must be a valid GUID.")
     try:
         output = build.output_root(args.output)
-        with AssessmentServer(args.port, output, args.subscription_id) as server:
+        with AssessmentServer(args.port, output) as server:
             print(f"Open in your local browser (do not share this address): {server.origin}{server.session}/", flush=True)
             try:
                 server.serve_forever()

@@ -2,9 +2,11 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import re
 import os
+from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -58,6 +60,24 @@ def configuration() -> ModelConnection | None:
     return ModelConnection(endpoint, deployment, key) if (endpoint or deployment or key) else None
 
 
+@dataclass(frozen=True)
+class FoundryReceipt:
+    agent: str
+    requested_at: str
+    duration_ms: int
+    http_status: int
+    evidence_patterns: int
+    provider_model: str | None
+    request_id: str | None
+    response_id: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+def receipt_field(value, pattern):
+    return value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+
+
 def invoke(connection: ModelConnection, role: str, evidence: list[dict]):
     label, purpose, options = AGENTS[role]
     rubric = {key: QUESTIONS[key] for key in options}
@@ -78,17 +98,38 @@ def invoke(connection: ModelConnection, role: str, evidence: list[dict]):
     url = f"{connection.endpoint}/openai/v1/responses"
     request = Request(url, method="POST", data=json.dumps(payload).encode(),
                       headers={"api-key": connection.api_key, "Content-Type": "application/json"})
+    started = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    start = monotonic()
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=45) as response:
             contents = response.read(512_001)
+            code = response.status
+            request_id = next((value for name in ("apim-request-id", "x-ms-request-id", "x-request-id")
+                               if (value := receipt_field(response.headers.get(name),
+                                   r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"))), None)
+            duration = round((monotonic() - start) * 1000)
         if len(contents) > 512_000:
             raise FoundryError("The Foundry response exceeded the size limit.")
         data = json.loads(contents)
+        if code != 200 or data.get("status", "completed") != "completed":
+            raise FoundryError("Foundry did not return a completed assessment response.")
         texts = [part["text"] for item in data["output"] if item.get("type") == "message"
                  and item.get("role") == "assistant" for part in item.get("content", [])
                  if part.get("type") == "output_text"]
         raw = json.loads("".join(texts))
-        return validate_decisions(raw, {row["id"] for row in evidence}, options)
+        decisions = validate_decisions(raw, {row["id"] for row in evidence}, options)
+        usage = data.get("usage")
+        input_count, output_count = ((usage.get("input_tokens"), usage.get("output_tokens"))
+                                     if isinstance(usage, dict) else (None, None))
+        provider_model = receipt_field(data.get("model"), r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+        if provider_model and connection.api_key in provider_model:
+            provider_model = None
+        response_id = receipt_field(data.get("id"), r"resp_[A-Za-z0-9_-]{8,100}")
+        return decisions, FoundryReceipt(
+            label, started, duration, code, len(evidence), provider_model, request_id, response_id,
+            input_count if type(input_count) is int and input_count >= 0 else None,
+            output_count if type(output_count) is int and output_count >= 0 else None,
+        )
     except HTTPError as exc:
         exc.close()
         if exc.code in (401, 403):
@@ -133,12 +174,15 @@ def assess_evidence(connection: ModelConnection, evidence: dict[str, list[dict]]
 
     def assess_batches(role, rows):
         result = {}
+        receipts = []
         for start in range(0, len(rows), BATCH_SIZE):
             batch = rows[start:start + BATCH_SIZE]
-            result.update(invoke(connection, role, batch))
-        return result
+            decisions, receipt = invoke(connection, role, batch)
+            result.update(decisions)
+            receipts.append(receipt)
+        return result, receipts
 
-    result, status, failures = {}, {}, []
+    result, status, failures, receipts = {}, {}, [], []
     with ThreadPoolExecutor(max_workers=2) as pool:
         calls = {}
         for role, rows in evidence.items():
@@ -153,13 +197,14 @@ def assess_evidence(connection: ModelConnection, evidence: dict[str, list[dict]]
         for call in as_completed(calls):
             role = calls[call]
             try:
-                decisions = call.result()
+                decisions, completed = call.result()
             except FoundryError as exc:
                 failures.append(f"{AGENTS[role][0]} agent: {exc}")
                 if on_progress:
                     on_progress(role, "failed", str(exc))
                 continue
             result.update(decisions)
+            receipts.extend(completed)
             reported = sum(decision[0] == "finding" for decision in decisions.values())
             unknown = sum(decision[0] == "insufficient" for decision in decisions.values())
             status[role] = f"Foundry assessed {len(decisions)} evidence rows: {reported} findings, {unknown} insufficient."
@@ -167,4 +212,4 @@ def assess_evidence(connection: ModelConnection, evidence: dict[str, list[dict]]
                 on_progress(role, "done", status[role])
         if failures:
             raise FoundryError(" ".join(failures))
-    return result, status
+    return result, status, sorted(receipts, key=lambda receipt: (receipt.requested_at, receipt.agent))

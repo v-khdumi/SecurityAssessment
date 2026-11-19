@@ -1,10 +1,5 @@
-"""Rebuild the synthetic Microsoft Graph configuration sample."""
+"""Synthetic archive content for tests only."""
 
-import json
-from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
-
-OUTPUT = Path(__file__).resolve().parents[1] / "samples" / "azure-graph-sample.zip"
 GRAPH = "https://graph.microsoft.com/v1.0/$metadata"
 SUB = "/subscriptions/00000000-0000-0000-0000-000000000001"
 SECOND_SUB = "/subscriptions/00000000-0000-0000-0000-000000000002"
@@ -112,11 +107,3 @@ FILES = {
         ],
     },
 }
-
-
-if __name__ == "__main__":
-    OUTPUT.parent.mkdir(exist_ok=True)
-    with ZipFile(OUTPUT, "w") as archive:
-        for name, value in FILES.items():
-            archive.writestr(ZipInfo(name), json.dumps(value, indent=2) + "\n", compress_type=ZIP_DEFLATED)
-    print(OUTPUT)

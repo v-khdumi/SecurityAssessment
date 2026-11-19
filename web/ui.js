@@ -2,7 +2,7 @@
 const element = id => document.getElementById(id);
 let ready = false;
 let choice;
-let pilot = false;
+let maxZipBytes = null;
 let revision = null;
 let reviewConfigured = false;
 let setupRevision = null;
@@ -15,7 +15,6 @@ async function loadMandate() {
     if (!response.ok) throw new Error();
     element("mandate").textContent = await response.text();
     element("review").disabled = false;
-    element("review-sample").disabled = false;
     ready = true;
   } catch {
     element("mandate").textContent = "The mandate is unavailable. The assessment cannot start.";
@@ -27,20 +26,14 @@ async function loadReadiness() {
     const response = await fetch("readiness", {cache: "no-store"});
     if (!response.ok) throw new Error();
     const state = await response.json();
-    pilot = state.single_subscription;
+    maxZipBytes = state.max_zip_bytes;
     revision = state.revision;
     reviewConfigured = state.foundry_configured;
-    element("pilot-scope").hidden = !pilot;
-    element("azure").disabled = !state.azure_configured;
-    if (!state.azure_configured) element("azure").checked = false;
-    element("azure-status").textContent = state.azure_configured ? "Configured; access not tested" : "Setup required";
+    element("archive-limit").textContent = `(up to ${maxZipBytes / (1024 * 1024)} MiB)`;
     element("foundry-status").textContent = reviewConfigured ? "Review agents configured · access not tested" : "Review agents · open Setup to connect";
   } catch {
     revision = null;
     reviewConfigured = false;
-    element("azure").checked = false;
-    element("azure").disabled = true;
-    element("azure-status").textContent = "Setup check failed";
     element("foundry-status").textContent = "Setup check failed";
   }
   element("review-label").textContent = reviewConfigured ? "Review and confirm" : "Connect review agents";
@@ -51,7 +44,6 @@ function populateSetup(settings) {
   setupRevision = settings.revision;
   savedKey = foundry.has_key === true;
   element("model-key").value = "";
-  element("azure-tenant").value = settings.azure_tenant;
   element("model-endpoint").value = foundry.endpoint || "";
   element("model-deployment").value = foundry.deployment || "";
   element("model-key").required = !savedKey;
@@ -65,7 +57,7 @@ async function openSetup() {
   setupRevision = null;
   element("setup-error").textContent = "";
   element("save-setup").disabled = true;
-  populateSetup({azure_tenant: "", foundry: {}, revision: null});
+  populateSetup({foundry: {}, revision: null});
   dialog.showModal();
   try {
     const response = await fetch("setup", {cache: "no-store"});
@@ -92,7 +84,7 @@ element("setup-form").addEventListener("submit", async event => {
   if (setupRevision === null || saving) return;
   const value = id => element(id).value.trim();
   const foundry = {endpoint: value("model-endpoint"), deployment: value("model-deployment"), api_key: value("model-key")};
-  const body = JSON.stringify({azure_tenant: value("azure-tenant"), foundry, revision: setupRevision});
+  const body = JSON.stringify({foundry, revision: setupRevision});
   const error = element("setup-error");
   error.textContent = "";
   saving = true;
@@ -105,7 +97,6 @@ element("setup-form").addEventListener("submit", async event => {
       error.textContent = reply.error;
       return;
     }
-    element("azure").checked = false;
     element("setup-dialog").close();
     await loadReadiness();
     element("status").textContent = "Setup saved for this session. No cloud connection was made.";
@@ -117,20 +108,6 @@ element("setup-form").addEventListener("submit", async event => {
   }
 });
 
-function showLogin(reply) {
-  element("login-message").textContent = `${reply.login}: ${reply.error} Confirm the assessment again after signing in.`;
-  const command = element("login-command");
-  command.textContent = "";
-  command.hidden = true;
-  element("login-show").disabled = false;
-  element("login-show").onclick = () => {
-    command.textContent = `az login --tenant ${reply.tenant} --allow-no-subscriptions`;
-    command.hidden = false;
-    element("login-show").disabled = true;
-  };
-  element("login").showModal();
-}
-
 element("review").addEventListener("click", () => {
   if (!ready) return;
   if (!reviewConfigured) {
@@ -138,31 +115,18 @@ element("review").addEventListener("click", () => {
     return;
   }
   const archive = element("archive").files[0];
-  const azure = !element("azure").disabled && element("azure").checked;
-  if (!archive && !azure) {
-    element("status").textContent = element("azure").disabled
-      ? "Select a configuration ZIP to continue. Live Azure collection is not available in this session."
-      : "Select a configuration ZIP or choose Collect current settings from Azure.";
+  if (!archive || archive.size === 0) {
+    element("status").textContent = "Select a nonempty configuration ZIP to continue.";
     return;
   }
-  if (archive && archive.size > 24 * 1024 * 1024) {
-    element("status").textContent = "The ZIP archive exceeds 24 MiB.";
+  if (maxZipBytes !== null && archive.size > maxZipBytes) {
+    element("status").textContent = `The ZIP exceeds ${maxZipBytes / (1024 * 1024)} MiB. Split your configuration export by subscription or workload.`;
     return;
   }
   const categories = [];
-  if (archive) categories.push("ZIP: recognized Entra policies, normalized inventory and RBAC, public Prowler catalogs, and normalized compliance summaries, if present. All other entries are excluded.");
-  if (azure) categories.push("Live Azure: subscriptions, groups, resource types and regions, RBAC (object ID, type, role ID), App Service publishing policies, sticky setting name counts, presence of diagnostic settings, group costs, 30-day HTTP totals, and Defender and Azure Policy aggregates. No setting values, publishing credentials, alert content, or tenant writes.");
-  if (azure && pilot) categories.push("Pilot scope: one subscription configured at startup. This limits live collection only and does not change the ZIP scope.");
+  categories.push("Only your uploaded ZIP is used. It is streamed to a temporary file in the approved local folder and closed after parsing. Only recognized configuration files are opened.");
   categories.push("Foundry receives only allowlisted Azure and Entra setting values and temporary row numbers. It determines the findings. No ZIP, resource or principal IDs, names, logs, costs, or raw metrics are sent. Calls can incur costs and produce telemetry.");
-  confirmRun({archive, azure, sample: false, revision}, categories);
-});
-
-element("review-sample").addEventListener("click", () => {
-  if (!ready) return;
-  confirmRun({sample: true}, [
-    "Offline demo: open only the built-in sample, which contains synthetic Graph policies and fictional Azure resources.",
-    "Create a demo report and CSVs locally. Neither review agent is called. No Azure connection or sign-in is used."
-  ]);
+  confirmRun({archive, revision}, categories);
 });
 
 function confirmRun(settings, categories) {
@@ -173,21 +137,15 @@ function confirmRun(settings, categories) {
     return li;
   }));
   choice = settings;
-  element("consent-title").textContent = settings.sample ? "Approve the offline demo" : "Review the data categories before running";
-  element("confirm-label").textContent = settings.sample
-    ? "I approve processing the synthetic example and saving a demo report in the local folder."
-    : "I have read the mandate. I confirm that the local folder and the configured Foundry deployment are approved by my organization and authorize transfer of the listed configuration indicators. My archive contains only permitted configuration evidence.";
-  element("start").textContent = settings.sample ? "Run offline demo" : "Start assessment";
   element("confirmed").checked = false;
   element("start").disabled = true;
   element("consent").showModal();
 }
 
-function showResult(reply, offlineDemo) {
+function showResult(reply) {
   const notice = element("result-notice");
-  notice.hidden = !reply.sample && reply.has_evidence;
-  notice.textContent = reply.sample ? "Synthetic sample. These findings do not describe your tenant."
-    : "No usable configuration evidence. Zero findings is not a clean bill of health.";
+  notice.hidden = reply.has_evidence;
+  notice.textContent = "No usable configuration evidence. Zero findings is not a clean bill of health.";
   element("metric-high").textContent = reply.high;
   element("metric-findings").textContent = reply.findings;
   element("metric-resources").textContent = reply.resources;
@@ -206,9 +164,8 @@ function showResult(reply, offlineDemo) {
   }));
   element("no-priority").hidden = reply.priority.length > 0;
   element("result-coverage").textContent = `${reply.controls_with_evidence} of ${reply.available_controls} resource controls had configuration evidence. This is coverage, not a pass rate. Graph observations are separate policy settings.`;
-  element("result-sources").textContent = `Recognized ZIP files: ${reply.eligible_files}. Entries not opened: ${reply.skipped}. Live Azure: ${reply.live_azure ? "queried; see the report for scope" : "not queried"}.`;
-  element("result-ai").textContent = offlineDemo ? "AI review was not called in the offline demo."
-    : `Foundry assessed ${reply.model_evidence_rows} evidence rows; ${reply.model_insufficient} were insufficient. The model determines findings. This is not a compliance verdict.`;
+  element("result-sources").textContent = `Recognized ZIP files: ${reply.eligible_files}. Entries not opened: ${reply.skipped}.`;
+  element("result-ai").textContent = `Foundry returned ${reply.foundry_requests} responses for ${reply.model_patterns} distinct configuration patterns, covering ${reply.model_evidence_rows} evidence rows. ${reply.model_insufficient} rows had insufficient evidence. See Method and limits for request receipts.`;
   element("open-report").href = reply.preview;
   element("open-findings").href = `${reply.preview}#findings`;
   element("download").href = reply.download;
@@ -217,8 +174,8 @@ function showResult(reply, offlineDemo) {
   element("result").scrollIntoView();
 }
 
-function startProgress(sample, azure) {
-  const steps = [["evidence", "Read configuration evidence"], ...(azure ? [["azure", "Collect live Azure settings"]] : []),
+function startProgress() {
+  const steps = [["upload", "Receive ZIP on this device"], ["evidence", "Read configuration evidence"],
     ["posture", "AI · Security Posture"], ["compliance", "AI · Compliance"], ["report", "Build the local report"]];
   const entries = new Map(steps.map(([id, label]) => {
     const item = document.createElement("li");
@@ -239,8 +196,7 @@ function startProgress(sample, azure) {
     target.detail.textContent = detail;
   };
   element("progress-steps").replaceChildren(...Array.from(entries.values(), ({item}) => item));
-  for (const [id] of steps) update(id, sample && ["posture", "compliance"].includes(id) ? "skipped" : "waiting",
-    sample && ["posture", "compliance"].includes(id) ? "Offline demo; no Azure call." : "");
+  for (const [id] of steps) update(id, id === "upload" ? "running" : "waiting");
   const start = Date.now();
   const tick = () => { element("run-time").textContent = `${Math.floor((Date.now() - start) / 1000)} s elapsed`; };
   const timer = setInterval(tick, 1000);
@@ -292,46 +248,37 @@ element("confirmed").addEventListener("change", () => {
   element("start").disabled = !element("confirmed").checked;
 });
 element("cancel").addEventListener("click", () => element("consent").close());
-element("login-close").addEventListener("click", () => element("login").close());
 
 element("start").addEventListener("click", async () => {
   if (!element("confirmed").checked || !choice) return;
-  const {archive, azure, sample} = choice;
+  const {archive, revision: approvedRevision} = choice;
   element("consent").close();
   element("review").disabled = true;
-  element("review-sample").disabled = true;
   element("open-setup").disabled = true;
   const status = element("status");
-  status.textContent = sample ? "Running the offline demo..." : azure
-    ? "Assessment in progress. Live Azure collection may take several minutes." : "Assessment in progress.";
+  status.textContent = "Uploading ZIP and running the assessment…";
   element("result").hidden = true;
-  const progress = startProgress(sample, azure);
+  const progress = startProgress();
   const headers = {"X-Assessment-Consent": "configuration-only", "Content-Type": "application/zip",
-    "Accept": "application/x-ndjson"};
-  if (azure) headers["X-Azure-Consent"] = "readonly-config";
-  if (!sample) {
-    headers["X-Foundry-Consent"] = "minimized-configuration";
-    headers["X-Setup-Revision"] = String(choice.revision);
-  }
+    "Accept": "application/x-ndjson", "X-Foundry-Consent": "minimized-configuration",
+    "X-Setup-Revision": String(approvedRevision)};
   try {
-    const response = await fetch(sample ? "sample" : "assess", {method: "POST", headers, body: archive || new Uint8Array()});
+    const response = await fetch("assess", {method: "POST", headers, body: archive});
     const {status: outcome, payload: reply} = await readRun(response, progress);
     if (outcome !== 200) {
       status.textContent = reply.error;
       progress.finish(false, reply.error);
-      if (reply.login) showLogin(reply);
-      if (outcome === 409 && !reply.login) await loadReadiness();
+      if (outcome === 409) await loadReadiness();
       return;
     }
     progress.finish(true);
-    status.textContent = sample ? "Offline demo report created. No cloud calls were made." : "Local snapshot created.";
-    showResult(reply, sample);
+    status.textContent = "Local snapshot created.";
+    showResult(reply);
   } catch {
     status.textContent = "The connection closed before the assessment result arrived. Check whether the app is running and try again.";
     progress.finish(false, status.textContent);
   } finally {
     element("review").disabled = false;
-    element("review-sample").disabled = false;
     element("open-setup").disabled = false;
   }
 });
