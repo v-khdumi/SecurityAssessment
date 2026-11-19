@@ -124,7 +124,7 @@ element("review").addEventListener("click", () => {
     return;
   }
   const categories = [];
-  categories.push("Only your uploaded ZIP is used. It is streamed to a temporary file in the approved folder on the assessment host and closed after parsing. Only recognized configuration files are opened.");
+  categories.push("Only your uploaded ZIP is used. The approved assessment host checks JSON content, skips unsupported data, and removes the temporary archive after parsing.");
   categories.push("Foundry receives only allowlisted Azure, Entra, and Microsoft 365 setting values and temporary row numbers. It determines the findings. No ZIP, resource, team or principal IDs, names, logs, costs, or raw metrics are sent. Calls can incur costs and produce telemetry.");
   confirmRun({archive, revision}, categories);
 });
@@ -164,7 +164,7 @@ function showResult(reply) {
   }));
   element("no-priority").hidden = reply.priority.length > 0;
   element("result-coverage").textContent = `${reply.controls_with_evidence} of ${reply.available_controls} resource controls had configuration evidence. This is coverage, not a pass rate. Graph observations are separate policy settings.`;
-  element("result-sources").textContent = `Recognized ZIP files: ${reply.eligible_files}. Entries not opened: ${reply.skipped}.`;
+  element("result-sources").textContent = `Recognized configuration types: ${reply.eligible_files}. Entries skipped: ${reply.skipped}.`;
   element("result-ai").textContent = `Foundry returned ${reply.foundry_requests} responses for ${reply.model_patterns} distinct configuration patterns, covering ${reply.model_evidence_rows} evidence rows. ${reply.model_insufficient} rows had insufficient evidence. See Method and limits for request receipts.`;
   element("open-report").href = reply.preview;
   element("open-findings").href = `${reply.preview}#findings`;

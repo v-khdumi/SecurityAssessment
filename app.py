@@ -218,14 +218,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.streaming = True
                     self.close_connection = True
                 self.progress("upload", "done", "ZIP received on the assessment host.")
-                self.progress("evidence", "running", "Reading recognized configuration files on the assessment host.")
+                self.progress("evidence", "running", "Checking JSON content for supported configuration on the assessment host.")
                 prepared_archive = read_archive(upload)
             self.progress("evidence", "done", "Archive validated. The temporary upload is closed.")
             self.progress("prepare", "running", "Checking the ZIP for supported assessment evidence.")
             if not prepared_archive[0]:
                 raise EvidenceError(
-                    "No recognized configuration files were found in the ZIP. Include a supported file such as "
-                    "assessment-v1.json, authorizationPolicy.json, or sharepointSettings.json. "
+                    "No supported configuration was found in the ZIP. JSON filenames do not need to be changed. "
+                    "Upload configuration data from a supported Graph endpoint or a normalized Azure inventory. "
                     "Sign-in, audit, and application logs are not assessed."
                 )
             status = {}

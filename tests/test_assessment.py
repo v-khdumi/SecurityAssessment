@@ -46,9 +46,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(skipped, 3)
 
     def test_rejects_duplicate_configuration_names_across_folders(self):
-        blob = archive(**{"authorizationPolicy.json": {}, "export/authorizationPolicy.json": {}})
+        policy = {"allowInvitesFrom": "none"}
+        blob = archive(**{"authorizationPolicy.json": policy, "export/renamed-policy.json": policy})
         with self.assertRaisesRegex(EvidenceError, "more than one authorizationPolicy.json"):
             read_archive(blob)
+
+    def test_detects_configuration_by_content_and_skips_unrelated_json(self):
+        blob = archive(**{
+            "exports/inventory/snapshot.JSON": CONFIG,
+            "exports/microsoft365/settings.json": {"value": {"sharingCapability": "disabled"}},
+            "exports/entra/first.json": {"allowInvitesFrom": "none"},
+            "exports/entra/second.json": {"value": [{"id": SUB, "state": "enabled", "conditions": {}}]},
+            "exports/telemetry.json": {"value": [{"state": "enabled", "ipAddress": "192.0.2.1"}]},
+            "exports/auditLogs/record.json": {"allowInvitesFrom": "everyone"},
+            "ERRORS.ndjson": "not JSON",
+        })
+        config, skipped = read_archive(blob)
+        self.assertEqual(set(config), {"assessment-v1.json", "sharepointSettings.json",
+                                       "authorizationPolicy.json", "conditionalAccessPolicies.json"})
+        self.assertEqual(config["authorizationPolicy.json"]["allowInvitesFrom"], "none")
+        self.assertEqual(skipped, 3)
 
     def test_rejects_unsafe_paths_for_recognized_configuration(self):
         for path in ("../authorizationPolicy.json", "/export/authorizationPolicy.json", r"C:\export\authorizationPolicy.json"):
@@ -483,9 +500,9 @@ class LocalAppTests(unittest.TestCase):
 
     def test_foundry_assesses_microsoft_365_only_archive_without_exporting_teams_or_domain_identity(self):
         blob = archive(**{
-            "export/m365/sharepointSettings.json": {"value": {"sharingCapability": "externalUserAndGuestSharing",
+            "export/m365/settings.json": {"value": {"sharingCapability": "externalUserAndGuestSharing",
                 "isLegacyAuthProtocolsEnabled": True, "sharingAllowedDomainList": ["excluded-domain.example.test"]}},
-            r"export\m365\teamsConfiguration.json": {"value": [{"id": SUB, "displayName": "Excluded Team Name",
+            r"export\m365\teams.json": {"value": [{"id": SUB, "displayName": "Excluded Team Name",
                 "guestSettings": {"allowDeleteChannels": True}}, {"id": "00000000-0000-0000-0000-000000000022"}]},
             "SHA256SUMS": "not JSON",
             "export/ERRORS.ndjson": "not JSON",
@@ -630,7 +647,7 @@ class LocalAppTests(unittest.TestCase):
         headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
                    "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0", "Accept": "application/x-ndjson"}
         cases = (
-            (archive(**{"export/resources.json": CONFIG}), "No recognized configuration files"),
+            (archive(**{"export/resources.json": {"value": [{"state": "enabled"}]}}), "No supported configuration was found"),
             (archive(**{"assessment-v1.json": {"schema_version": 1, "resources": []}}),
              "no supported configuration settings"),
         )

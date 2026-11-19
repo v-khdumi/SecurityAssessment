@@ -290,7 +290,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         ("Assessment engine", summary["analysis_mode"]),
         ("High", counts["High"]), ("Medium", counts["Medium"]), ("Low", counts["Low"]),
         ("Subscriptions observed", len(subs)), ("Resource groups observed", len(groups)),
-        ("Recognized configuration files", len(config)), ("Skipped entries (not opened)", skipped),
+        ("Recognized configuration types", len(config)), ("Entries skipped", skipped),
         ("Graph configuration observations", len(graph)),
         ("Microsoft 365 configuration observations", summary["m365_observations"]),
         ("Resource controls with evidence", len(observed)),
@@ -318,7 +318,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         summary["executive"] = [
             ("Outcome", headline),
             ("First action", next_step),
-            ("Scope", f"{len(config)} recognized ZIP files; {skipped} entries not opened. "
+            ("Scope", f"{len(config)} recognized configuration types; {skipped} entries skipped. "
                       f"{len(resources)} Azure resources, {len(graph)} Entra observations, and "
                       f"{summary['m365_observations']} Microsoft 365 observations were read from the upload."),
             ("Evidence gaps", f"{no_finding} evidence rows returned no finding; {summary['model_insufficient']} were insufficient. "

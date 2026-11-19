@@ -26,6 +26,14 @@ SHAREPOINT_SHARING_CAPABILITIES = {
     "disabled", "externalUserSharingOnly", "externalUserAndGuestSharing", "existingExternalUserSharingOnly",
 }
 PROWLER_CATALOGS = {"prowler-cis-azure.json": "CIS", "prowler-nis2-azure.json": "NIS2"}
+CONDITIONAL_ACCESS_STATES = ("enabled", "disabled", "enabledForReportingButNotEnforced")
+SHAREPOINT_FLAGS = ("isLegacyAuthProtocolsEnabled", "isResharingByExternalUsersEnabled",
+                    "isRequireAcceptingUserToMatchInvitedUserEnabled", "isUnmanagedSyncAppForTenantRestricted")
+TEAM_GUEST_FLAGS = ("allowCreateUpdateChannels", "allowDeleteChannels")
+NON_CONFIGURATION_MEMBERS = {
+    "sha256sums", "error", "errors", "exporterrors", "signins", "signinlogs", "auditlogs",
+    "directoryaudits", "applicationlogs",
+}
 GUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.I)
 SCOPE = re.compile(
     r"/(?:subscriptions/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
@@ -292,6 +300,57 @@ def project_inventory(inputs, key):
             overlap, sorted(omitted), suggestions)
 
 
+def configuration_document(document, conditional_access_hint=False):
+    body = as_dict(document)
+    if "error" in body:
+        return None
+    if "schema_version" in body and body.keys() & {"resources", "subscriptions", "groups", "rbac", "functions", "costs", "posture"}:
+        if type(body["schema_version"]) is not int or body["schema_version"] != 1:
+            raise EvidenceError("The normalized assessment inventory must declare schema_version: 1.")
+        return "assessment-v1.json", body
+    for name, framework in PROWLER_CATALOGS.items():
+        if body.get("Framework") == framework and "Requirements" in body:
+            return name, body
+    if "version" in body and body.keys() & {"requirements", "checks"}:
+        return "prowler-summary.json", body
+
+    source = body.get("value", document)
+    settings = as_dict(source)
+    signatures = {
+        "authorizationPolicy.json": {"allowInvitesFrom", "defaultUserRolePermissions"},
+        "authenticationMethodsPolicy.json": {"authenticationMethodConfigurations"},
+        "sharepointSettings.json": {"sharingCapability", "idleSessionSignOut", *SHAREPOINT_FLAGS},
+    }
+    matches = [name for name, fields in signatures.items() if settings.keys() & fields]
+    if len(matches) > 1:
+        raise EvidenceError("A JSON document matches multiple configuration formats. Export each configuration separately.")
+    if matches:
+        return matches[0], settings
+
+    items = source if isinstance(source, list) else [source]
+    if len(items) > MAX_ROWS:
+        raise EvidenceError("A JSON collection exceeds the row limit.")
+    if all(isinstance(item, dict) for item in items) and any(
+        as_dict(item.get("guestSettings")).keys() & set(TEAM_GUEST_FLAGS) for item in items
+    ):
+        return "teamsConfiguration.json", {"value": items}
+    context = body.get("@odata.context")
+    conditional_access = conditional_access_hint or (
+        isinstance(context, str) and context.split("#", 1)[-1].lower().removesuffix("/$entity")
+        in {"identity/conditionalaccess/policies", "conditionalaccesspolicies", "collection(microsoft.graph.conditionalaccesspolicy)"}
+    )
+    if (items or conditional_access) and all(
+        isinstance(item, dict) and item.get("state") in CONDITIONAL_ACCESS_STATES
+        and (conditional_access or (is_guid(item.get("id")) and isinstance(item.get("conditions"), dict))
+             or item.get("@odata.type") == "#microsoft.graph.conditionalAccessPolicy")
+        for item in items
+    ):
+        if "@odata.nextLink" in body:
+            return "conditionalAccessPolicies.json", {"value": items, "@odata.nextLink": None}
+        return "conditionalAccessPolicies.json", {"value": items}
+    return None
+
+
 def read_archive(source):
     file = io.BytesIO(source) if isinstance(source, bytes) else source
     size = file.seek(0, io.SEEK_END)
@@ -303,38 +362,52 @@ def read_archive(source):
             infos = archive.infolist()
             if len(infos) > MAX_MEMBERS:
                 raise EvidenceError(f"The ZIP exceeds {MAX_MEMBERS:,} entries. Repackage only the required configuration files.")
-            accepted = {}
+            config = {}
+            parsed_bytes = 0
             skipped = 0
             for entry in infos:
                 parts = entry.filename.replace("\\", "/").split("/")
-                name = parts[-1]
-                if not name:
+                filename = parts[-1]
+                if not filename:
                     continue
-                if name not in MEMBERS:
+                if not filename.lower().endswith(".json") or any(
+                    re.sub(r"[-_ .]", "", part.lower().removesuffix(".json")) in NON_CONFIGURATION_MEMBERS for part in parts
+                ):
                     skipped += 1
                     continue
                 if "" in parts or ".." in parts or any(":" in part for part in parts) or "\x00" in entry.orig_filename:
-                    raise EvidenceError(f"The ZIP contains an unsafe path for {name}.")
-                if name in accepted:
-                    raise EvidenceError(f"The ZIP contains more than one {name}. Include only one copy, even across folders.")
+                    raise EvidenceError("The ZIP contains an unsafe path for a JSON file.")
                 mode = entry.external_attr >> 16
                 if entry.file_size > MAX_MEMBER:
-                    raise EvidenceError(f"A configuration file exceeds {MAX_MEMBER // MIB} MiB uncompressed. Split by assessment scope.")
+                    raise EvidenceError(f"A JSON file exceeds {MAX_MEMBER // MIB} MiB uncompressed. Split by assessment scope.")
                 if entry.flag_bits & 1 or stat.S_ISLNK(mode) or entry.file_size > max(1, entry.compress_size) * 200:
-                    raise EvidenceError("A configuration entry is encrypted or unsafe to expand.")
-                accepted[name] = entry
-            if sum(entry.file_size for entry in accepted.values()) > MAX_CONFIG_BYTES:
-                raise EvidenceError(f"Configuration files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
-            config = {}
-            for name, entry in accepted.items():
+                    raise EvidenceError("A JSON entry is encrypted or unsafe to expand.")
+                parsed_bytes += entry.file_size
+                if parsed_bytes > MAX_CONFIG_BYTES:
+                    raise EvidenceError(f"JSON files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
                 with archive.open(entry) as stream:
-                    config[name] = parse_json(stream.read(MAX_MEMBER + 1))
-                if not isinstance(config[name], dict):
-                    raise EvidenceError("A recognized configuration file does not have a JSON object at the root.")
-            if "assessment-v1.json" in config:
-                version = config["assessment-v1.json"].get("schema_version")
-                if type(version) is not int or version != 1:
-                    raise EvidenceError("assessment-v1.json must declare schema_version: 1.")
+                    raw = stream.read(MAX_MEMBER + 1)
+                try:
+                    document = parse_json(raw)
+                except EvidenceError:
+                    if filename in MEMBERS:
+                        raise
+                    skipped += 1
+                    continue
+                match = configuration_document(document, filename == "conditionalAccessPolicies.json")
+                if match is None:
+                    skipped += 1
+                    continue
+                name, body = match
+                if name in config:
+                    if name != "teamsConfiguration.json":
+                        raise EvidenceError(f"The ZIP contains more than one {name} configuration. Include only one copy, even across folders.")
+                    entries = config[name]["value"]
+                    if len(entries) + len(body["value"]) > MAX_ROWS:
+                        raise EvidenceError("The combined Teams configurations exceed the row limit.")
+                    entries.extend(body["value"])
+                else:
+                    config[name] = body
             return config, skipped
     except (zipfile.BadZipFile, NotImplementedError, OSError, RuntimeError, EOFError, zlib.error) as exc:
         raise EvidenceError("The ZIP archive could not be opened safely.") from exc
@@ -360,7 +433,7 @@ def graph_config(config):
                 if kind and status:
                     result.append((name, kind, status))
         else:
-            counts = {status: 0 for status in ("enabled", "disabled", "enabledForReportingButNotEnforced")}
+            counts = dict.fromkeys(CONDITIONAL_ACCESS_STATES, 0)
             if "value" not in body:
                 continue
             observed = 0
@@ -382,9 +455,7 @@ def m365_config(config, key):
     if "sharepointSettings.json" in config:
         body = config["sharepointSettings.json"]
         settings = as_dict(body["value"]) if "value" in body else body
-        props = {field: settings[field] for field in ("isLegacyAuthProtocolsEnabled",
-                 "isResharingByExternalUsersEnabled", "isRequireAcceptingUserToMatchInvitedUserEnabled",
-                 "isUnmanagedSyncAppForTenantRestricted") if type(settings.get(field)) is bool}
+        props = {field: settings[field] for field in SHAREPOINT_FLAGS if type(settings.get(field)) is bool}
         sharing = checked(settings.get("sharingCapability"), SHAREPOINT_SHARING_CAPABILITIES)
         if sharing is not None:
             props["sharingCapability"] = sharing
@@ -402,7 +473,7 @@ def m365_config(config, key):
         for team in items:
             guests = as_dict(team.get("guestSettings"))
             props = {f"guestSettings.{field}": guests[field]
-                     for field in ("allowCreateUpdateChannels", "allowDeleteChannels") if type(guests.get(field)) is bool}
+                     for field in TEAM_GUEST_FLAGS if type(guests.get(field)) is bool}
             if not props:
                 continue
             if not is_guid(team.get("id")):

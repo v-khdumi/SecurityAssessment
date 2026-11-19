@@ -42,7 +42,7 @@
         <div class="upload-box">
           <label for="archive">Configuration ZIP <span id="archive-limit" class="muted"></span></label>
           <input id="archive" type="file" accept=".zip,application/zip" aria-describedby="archive-help">
-          <p class="muted" id="archive-help">Recognized configuration files can be in folders. Checksums and error files are ignored. Do not rename sign-in, audit, or application logs.</p>
+          <p class="muted" id="archive-help">Supported configuration is detected from JSON content, including in subfolders. Checksums, errors, and logs are not assessed.</p>
         </div>
         <p id="foundry-status" class="source-status" aria-live="polite">Checking review agent setup...</p>
         <div class="run-bar">

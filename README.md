@@ -24,7 +24,7 @@ Each report tab includes a **Review and closure checklist** for the relevant dom
 
 Each finding links directly to the relevant **Microsoft Learn** procedures. Each tab also includes scope-specific links with a short explanation of what to verify. **Security posture** explains how to interpret the supplied Entra settings before showing the underlying Graph rows. Reference URLs come from a fixed public Microsoft Learn catalog, not the uploaded archive or AI responses. They are exported to CSV and load only when clicked; the report opens them without sending its own URL as a referrer.
 
-**Assessment progress** shows upload, ZIP validation, evidence preparation, each AI agent's response, and report creation. If a run stops, the error is shown in that panel. A validated ZIP is readable, but it does not necessarily contain supported settings. If the run stops before either agent starts, check for the accepted filenames and required configuration fields. The app does not fall back to an offline result.
+**Assessment progress** shows upload, ZIP validation, evidence preparation, each AI agent's response, and report creation. If a run stops, the error is shown in that panel. A validated ZIP is readable, but it does not necessarily contain supported settings. If the run stops before either agent starts, check that the export contains configuration from a supported source. The app does not fall back to an offline result.
 
 After opening the report from the app, select **Clean** next to **Toggle theme** to return to the ZIP upload and clear the matching workspace. Saved reports and Foundry setup stay in place. Select a ZIP and confirm again to start another assessment. The button is hidden in HTML reports opened as local files.
 
@@ -48,7 +48,9 @@ Keep the tunnel open and use the exact session URL printed by the application, i
 
 ## Accepted ZIP format
 
-Only the following exact, case-sensitive filenames are opened, at the root or in subfolders. Each supported filename may occur only once in an archive. Checksums (`SHA256SUMS`), error files (`ERRORS.ndjson`), and other unrecognized files are counted but neither opened nor listed. An export error can still mean that a required configuration file is missing. Never rename sign-in, audit, user, or application logs to one of these names. Limits: 512 MiB per archive, 4,000 entries, 32 MiB per accepted file uncompressed, and 64 MiB total accepted configuration uncompressed. Recognized configuration files must be JSON objects. Larger exports should be scoped by subscription or workload and assessed as separate, valid ZIPs; do not split the bytes of a single ZIP.
+The host checks `.json` files in the ZIP, including subfolders, and identifies supported configuration by its structure and fields. The names below are examples; files do not need to be renamed. Only supported configuration contributes to the assessment. Unsupported or malformed JSON is counted as skipped, except that invalid JSON in a file with a documented example name fails explicitly. Checksums, error files, and folders or files identified as sign-in, audit, or application logs are skipped without being opened. An export error can still mean that required configuration is missing.
+
+Include one document per tenant configuration type. Individual Teams responses can be spread across multiple JSON files. For Conditional Access, include the original Graph metadata or full policy objects with `id`, `state`, and `conditions` so the importer can distinguish them from other lists. One Azure inventory in the documented normalized format is supported. Limits: 512 MiB per archive, 4,000 entries, 32 MiB per JSON file checked, and 64 MiB across JSON files checked (uncompressed). For larger exports, split by assessment scope rather than splitting the bytes of a ZIP.
 
 | Entry | Accepted evidence |
 |---|---|
