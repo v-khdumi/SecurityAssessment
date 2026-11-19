@@ -83,7 +83,8 @@ SCRIPT = """
 const pageSections = Array.from(document.querySelectorAll('main > section'));
 const menu = document.getElementById('section-menu');
 function showPanel(scroll) {
-  const selected = pageSections.find(section => '#' + section.id === location.hash) || pageSections[0];
+  const target = document.getElementById(location.hash.slice(1));
+  const selected = target?.closest('main > section') || pageSections[0];
   for (const panel of pageSections) panel.hidden = panel !== selected;
   for (const link of document.querySelectorAll('nav .jump')) {
     if (link.hash === '#' + selected.id) link.setAttribute('aria-current', 'page');
@@ -92,7 +93,8 @@ function showPanel(scroll) {
   menu.value = selected.id;
   if (scroll) {
     selected.querySelector('h2').focus({preventScroll: true});
-    window.scrollTo(0, 0);
+    if (target && target !== selected && selected.contains(target)) target.scrollIntoView();
+    else window.scrollTo(0, 0);
   }
 }
 menu.addEventListener('change', () => { location.hash = menu.value; });
@@ -220,7 +222,9 @@ def render(tables, timestamp, summary):
     narrative = "".join(f"<p><strong>{esc(topic)}:</strong> {esc(detail)}</p>" for topic, detail in executive)
     if narrative:
         narrative = f'<article><h3>Executive summary</h3>{narrative}</article>'
-    overview = f"""{narrative}<div class="metrics">
+    partial = ('<p class="notice"><strong>Partial assessment:</strong> Some evidence is missing or was skipped. '
+               '<a href="#archive-import">See archive import coverage</a>.</p>') if summary.get("partial_import") else ""
+    overview = f"""{partial}{narrative}<div class="metrics">
 <div class="metric"><b>{summary["high"]}</b>High-priority findings</div>
 <div class="metric"><b>{summary["findings"]}</b>Total findings</div>
 <div class="metric"><b>{summary["resources"]}</b>Resources observed</div>
@@ -266,7 +270,8 @@ def render(tables, timestamp, summary):
                 card = f'<article class="review-guide" data-filter><details><summary>{esc(title)}</summary>{panel}</details></article>'
                 content.insert(1 if index == 0 else 0, card)
             else:
-                content.append(f'<article{" data-filter" if data else ""}><h3>{esc(title)}</h3>{panel}</article>')
+                anchor = ' id="archive-import"' if slug == "archive-import" else ""
+                content.append(f'<article{anchor}{" data-filter" if data else ""}><h3>{esc(title)}</h3>{panel}</article>')
         panels.append(f'<section id="{section_id}"{" hidden" if index else ""}><h2 tabindex="-1">{esc(area)}</h2>{"".join(content)}</section>')
     csp = f"default-src 'none'; script-src 'sha256-{hash_source(SCRIPT)}'; style-src 'sha256-{hash_source(STYLE)}'; base-uri 'none'; form-action 'none'"
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">

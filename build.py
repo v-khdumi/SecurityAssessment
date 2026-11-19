@@ -15,7 +15,8 @@ import stat
 import sys
 
 from controls import GRAPH_RULES, GUIDANCE, M365_RULES, NIS2, QUESTIONS, RULES, WEB, findings
-from evidence import (PROWLER_CATALOGS, SHAREPOINT_SHARING_CAPABILITIES, TYPES, EvidenceError, graph_config, m365_config,
+from evidence import (PROWLER_CATALOGS, SHAREPOINT_SHARING_CAPABILITIES, TYPES, EvidenceError,
+                      conditional_access_config, graph_config, m365_config,
                       project_costs, project_functions, project_inventory, project_posture, prowler_config, read_archive)
 from microsoft_guidance import FINDING_REFERENCES, SECTION_REFERENCES, entra_review, reference_rows, url
 from report import render
@@ -39,7 +40,10 @@ REVIEW_FIELDS = {
     "sharingCapability": SHAREPOINT_SHARING_CAPABILITIES, "isLegacyAuthProtocolsEnabled": bool,
     "isResharingByExternalUsersEnabled": bool, "guestSettings.allowCreateUpdateChannels": bool,
     "guestSettings.allowDeleteChannels": bool,
+    "enabledAlternativeAuthentication": bool,
 }
+CA_CONTEXT_FIELDS = ("policyState", "userScope", "applicationScope", "exclusionsObserved",
+                     "grantOperator", "authenticationGrant")
 
 AREAS = (
     "Summary", "Systems", "Resilience & DR", "Findings", "Resources", "Resource groups",
@@ -95,13 +99,6 @@ def csv_data(columns, records):
 def graph_evidence(graph):
     states = {(source, field.split(" · ", 1)[0]): value for source, field, value in graph}
     settings = {}
-    statuses = ("enabled", "disabled", "enabledForReportingButNotEnforced")
-    conditional = "conditionalAccessPolicies.json"
-    if all((conditional, state) in states for state in statuses):
-        any_report_only = states[conditional, statuses[-1]] > 0
-        paginated = any(source == conditional and "more pages" in field for source, field, _ in graph)
-        if any_report_only or not paginated:
-            settings["reportOnlyPresent"] = any_report_only
     methods = "authenticationMethodsPolicy.json"
     voice, sms = (states.get((methods, method)) for method in ("Voice", "Sms"))
     if "enabled" in (voice, sms) or voice == sms == "disabled":
@@ -115,11 +112,11 @@ def graph_evidence(graph):
             "properties": settings, "source": "ZIP — Microsoft Graph", "evidence_sources": {}}
 
 
-def model_evidence(resources, graph, m365):
+def model_evidence(resources, graph, m365, ca_policies):
     ledger = {}
     patterns = {}
     batches = {"posture": [], "compliance": []}
-    scopes = (("posture", RULES, resources), ("compliance", GRAPH_RULES, [graph_evidence(graph)]),
+    scopes = (("posture", RULES, resources), ("compliance", GRAPH_RULES, [graph_evidence(graph), *ca_policies]),
               ("compliance", M365_RULES, m365))
     for role, rules, scope in scopes:
         for resource in scope:
@@ -136,13 +133,18 @@ def model_evidence(resources, graph, m365):
                     accepted is not bool and (not isinstance(value, str) or value not in accepted)
                 ):
                     raise EvidenceError("A projected evidence value is not in the approved Foundry schema.")
-                pattern = role, rule.key, value
+                context = tuple((field, resource["properties"][field]) for field in CA_CONTEXT_FIELDS
+                                if field in resource["properties"]) if resource["type"] == "microsoft.graph/conditionalaccess" else ()
+                pattern = role, rule.key, value, context
                 if pattern not in patterns:
                     anchor = len(ledger) + 1
                     patterns[pattern] = anchor
                     ledger[anchor] = []
-                    batches[role].append({"id": anchor, "control": rule.key, "setting": field, "observed": value,
-                                          "finding_when": expected, "typical_severity": rule.severity})
+                    row = {"id": anchor, "control": rule.key, "setting": field, "observed": value,
+                           "finding_when": expected, "typical_severity": rule.severity}
+                    if context:
+                        row["policy_context"] = dict(context)
+                    batches[role].append(row)
                 ledger[patterns[pattern]].append((rule, resource, role))
     return batches, ledger
 
@@ -186,8 +188,8 @@ def finding_record(entry, count, reviews, anonymous_functions, model_selected):
 def dataset(blob, live, reviews, review_status, timestamp, key, assignments, prepared_archive=None,
             review_mode="off", assess=None):
     uploaded = blob is not None or prepared_archive is not None
-    config, skipped = prepared_archive if prepared_archive is not None else (
-        read_archive(blob) if blob is not None else ({}, 0))
+    archive = prepared_archive if prepared_archive is not None else read_archive(blob) if blob is not None else None
+    config, skipped = (archive.config, archive.skipped) if archive is not None else ({}, 0)
     sources = []
     if "assessment-v1.json" in config:
         raw = config["assessment-v1.json"]
@@ -196,6 +198,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         sources.append((live, True))
     resources, groups, subs, rbac, overlap, omitted, suggestions = project_inventory(sources, key)
     graph, graph_omitted = graph_config(config)
+    ca_policies = conditional_access_config(config, key)
     m365 = m365_config(config, key)
     m365_ids = {scope["id"] for scope in m365}
     version, checks = prowler_config(config.get("prowler-summary.json"),
@@ -224,7 +227,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     if model_selected:
         if assess is None:
             raise EvidenceError("A Foundry assessment requires model decisions; no local fallback is permitted.")
-        batches, ledger = model_evidence(resources, graph, m365)
+        batches, ledger = model_evidence(resources, graph, m365, ca_policies)
         decisions, review_status, foundry_receipts = assess(batches)
         if decisions.keys() != ledger.keys():
             raise EvidenceError("Foundry did not return results covering the submitted evidence.")
@@ -283,6 +286,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                "analysis_mode": "Foundry" if model_selected else "Local rules",
                "model_evidence_rows": len(model_rows), "model_patterns": model_pattern_count,
                "foundry_requests": len(foundry_receipts),
+               "partial_import": skipped > 0 or (uploaded and (not resources or not m365)),
                "model_insufficient": sum(row[-2] == "insufficient" for row in model_rows)}
     attention = [
         ("Breach status", "Not assessed. These sources neither confirm nor rule out an incident."),
@@ -298,6 +302,10 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     if not has_evidence:
         attention.append(("Coverage", "No usable configuration evidence. Do not interpret zero findings as a favorable result."))
     add("Summary", "overview", "What needs attention", ("Indicator", "Value"), attention)
+    if archive is not None:
+        add("Summary", "archive-import", "Archive import coverage", ("ZIP entry", "Disposition", "Configuration type or reason"),
+            archive.decisions, "Entry numbers are positions in the ZIP directory (including folders). "
+            "Filenames, file contents, and skipped data are not included. Imported does not mean every field was assessed.")
     if model_selected:
         scope_count = len({resource["id"] for _, resource, _, _, _ in active if not resource["type"].startswith("microsoft.graph")})
         no_finding = sum(row[-2] == "no_finding" for row in model_rows)
@@ -306,7 +314,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             label = "finding" if len(active) == 1 else "findings"
             headline = (f"Foundry identified {len(active)} {label} ({counts['High']} high, {counts['Medium']} medium, "
                         f"{counts['Low']} low) affecting {scope_count} of {len(resources)} inventoried Azure resources.")
-            if any(resource["type"] == "microsoft.graph" for _, resource, _, _, _ in active):
+            if any(resource["type"] in {"microsoft.graph", "microsoft.graph/conditionalaccess"}
+                   for _, resource, _, _, _ in active):
                 headline += " The total also includes Entra policy findings."
             if any(resource["id"] in m365_ids for _, resource, _, _, _ in active):
                 headline += " The total also includes Microsoft 365 findings."
@@ -326,6 +335,11 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             ("Foundry calls", f"{len(foundry_receipts)} completed responses covering {model_pattern_count} distinct patterns. "
                               "See Method and limits for request IDs, model metadata, and timings when available."),
         ]
+        missing_domains = [label for label, available in (("Azure resource inventory", resources), ("Microsoft 365 configuration", m365))
+                           if not available]
+        if missing_domains:
+            summary["executive"].insert(1, ("Not assessed", ", ".join(missing_domains)
+                                            + " was not supplied in a supported format. Check Archive import coverage."))
         add("Summary", "executive-summary", "Executive summary", ("Topic", "Conclusion"), summary["executive"])
     hits = Counter(rule.key for rule, *_ in active)
     coverage_rows = [(rule.key, rule.title, observed[rule.key], eligible[rule.key] - observed[rule.key], hits[rule.key],
@@ -473,6 +487,11 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
          "Microsoft Learn — primary", "Microsoft Learn — follow-up"),
         entra_review(graph), "These are configuration review prompts, not new findings or proof of tenant-wide enforcement.")
     add("Security posture", "entra", "Entra — Graph configuration summary", ("Source", "Control", "Value"), graph)
+    add("Security posture", "conditional-access", "Conditional Access policy evidence",
+        ("Policy", "State", "User scope", "Application scope", "Exclusions observed", "Grant operator", "Authentication grant"),
+        ((scope["id"], *(scope["properties"].get(field) for field in CA_CONTEXT_FIELDS)) for scope in ca_policies),
+        "Policy IDs are pseudonymized. Blank fields were not present in the export or could not be classified. "
+        "This table does not establish effective tenant-wide MFA coverage.")
     add("Microsoft 365", "configuration", "SharePoint, OneDrive, and Teams configuration",
         ("Evidence scope", "Source", "Setting", "Observed value"),
         ((scope["id"], scope["source"], field, value) for scope in m365
@@ -719,16 +738,26 @@ def main():
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description="Transform configuration metadata into a local report.")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     operation = parser.add_mutually_exclusive_group(required=True)
     operation.add_argument("--zip", type=Path)
+    operation.add_argument("--inspect-zip", type=Path, help="Print privacy-safe import counts without creating a report or calling Foundry.")
     operation.add_argument("--delete-snapshot")
     parser.add_argument("--confirm", action="store_true", help="Confirm the mandate and the selected operation.")
     args = parser.parse_args()
     if not args.confirm:
         parser.error("Read mandate.txt, review the categories in the README, and explicitly approve with --confirm.")
+    if args.inspect_zip is None and args.output is None:
+        parser.error("--output is required when generating or deleting a report.")
     try:
-        if args.delete_snapshot:
+        if args.inspect_zip:
+            with args.inspect_zip.open("rb") as file:
+                imported = read_archive(file)
+            for (status, reason), count in sorted(Counter((status, reason) for _, status, reason in imported.decisions).items()):
+                print(f"{count} {status.lower()}: {reason}")
+            if not imported.decisions:
+                print("No files to inspect.")
+        elif args.delete_snapshot:
             delete_snapshot(args.output, args.delete_snapshot)
             print("Snapshot deleted.")
         else:

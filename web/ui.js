@@ -144,8 +144,10 @@ function confirmRun(settings, categories) {
 
 function showResult(reply) {
   const notice = element("result-notice");
-  notice.hidden = reply.has_evidence;
-  notice.textContent = "No usable configuration evidence. Zero findings is not a clean bill of health.";
+  notice.hidden = reply.has_evidence && !reply.partial_import;
+  notice.textContent = reply.has_evidence
+    ? "Partial assessment. See Archive import coverage in the report for skipped files and missing scope."
+    : "No usable configuration evidence. Zero findings is not a clean bill of health.";
   element("metric-high").textContent = reply.high;
   element("metric-findings").textContent = reply.findings;
   element("metric-resources").textContent = reply.resources;

@@ -8,6 +8,7 @@ import re
 import stat
 import zipfile
 import zlib
+from dataclasses import dataclass
 from datetime import date
 
 MIB = 1024 * 1024
@@ -132,6 +133,13 @@ IGNORED_FIELD_LABELS = {
 
 class EvidenceError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class ArchiveImport:
+    config: dict
+    skipped: int
+    decisions: list[tuple[int, str, str]]
 
 
 def parse_json(raw):
@@ -364,16 +372,19 @@ def read_archive(source):
                 raise EvidenceError(f"The ZIP exceeds {MAX_MEMBERS:,} entries. Repackage only the required configuration files.")
             config = {}
             parsed_bytes = 0
+            decisions = []
             skipped = 0
-            for entry in infos:
+            for index, entry in enumerate(infos, start=1):
                 parts = entry.filename.replace("\\", "/").split("/")
                 filename = parts[-1]
                 if not filename:
                     continue
-                if not filename.lower().endswith(".json") or any(
+                excluded = any(
                     re.sub(r"[-_ .]", "", part.lower().removesuffix(".json")) in NON_CONFIGURATION_MEMBERS for part in parts
-                ):
+                )
+                if excluded or not filename.lower().endswith(".json"):
                     skipped += 1
+                    decisions.append((index, "Skipped", "Excluded log, error, or checksum" if excluded else "Not a JSON file"))
                     continue
                 if "" in parts or ".." in parts or any(":" in part for part in parts) or "\x00" in entry.orig_filename:
                     raise EvidenceError("The ZIP contains an unsafe path for a JSON file.")
@@ -393,10 +404,21 @@ def read_archive(source):
                     if filename in MEMBERS:
                         raise
                     skipped += 1
+                    decisions.append((index, "Skipped", "Invalid JSON"))
                     continue
                 match = configuration_document(document, filename == "conditionalAccessPolicies.json")
                 if match is None:
                     skipped += 1
+                    body = as_dict(document)
+                    if "error" in body:
+                        reason = "API error response"
+                    elif isinstance(body.get("responses"), list):
+                        reason = "Unsupported batch response; export individual response bodies"
+                    elif isinstance(body.get("value", document), list):
+                        reason = "JSON collection has no supported configuration"
+                    else:
+                        reason = "JSON content has no supported configuration"
+                    decisions.append((index, "Skipped", reason))
                     continue
                 name, body = match
                 if name in config:
@@ -408,9 +430,67 @@ def read_archive(source):
                     entries.extend(body["value"])
                 else:
                     config[name] = body
-            return config, skipped
+                decisions.append((index, "Imported", name))
+            return ArchiveImport(config, skipped, decisions)
     except (zipfile.BadZipFile, NotImplementedError, OSError, RuntimeError, EOFError, zlib.error) as exc:
         raise EvidenceError("The ZIP archive could not be opened safely.") from exc
+
+
+def conditional_access_config(config, key):
+    source = "conditionalAccessPolicies.json"
+    if source not in config:
+        return []
+    result = []
+    seen = set()
+    known_grants = {"block", "mfa", "compliantDevice", "domainJoinedDevice", "approvedApplication",
+                    "compliantApplication", "passwordChange", "riskRemediation"}
+    for index, policy in enumerate(rows(config[source]["value"]), start=1):
+        state = checked(policy.get("state"), CONDITIONAL_ACCESS_STATES)
+        if state is None:
+            continue
+        reference = policy["id"] if is_guid(policy.get("id")) else f"export-row-{index}"
+        policy_id = alias(key, "ca", reference)
+        if policy_id in seen:
+            raise EvidenceError("Conditional Access configuration contains a duplicate policy.")
+        seen.add(policy_id)
+        props = {"policyState": state, "reportOnlyPresent": state == "enabledForReportingButNotEnforced"}
+        conditions = as_dict(policy.get("conditions"))
+        users = as_dict(conditions.get("users"))
+        apps = as_dict(conditions.get("applications"))
+        for field, targets, include in (("userScope", users, "includeUsers"), ("applicationScope", apps, "includeApplications")):
+            listed = targets.get(include)
+            if isinstance(listed, list) and listed:
+                props[field] = "all" if "All" in listed else "selected"
+        exclusion_fields = ((users, ("excludeUsers", "excludeGroups", "excludeRoles", "excludeGuestsOrExternalUsers")),
+                            (apps, ("excludeApplications",)))
+        if any(isinstance(targets.get(field), (list, dict)) and targets[field]
+               for targets, fields in exclusion_fields for field in fields):
+            props["exclusionsObserved"] = True
+        grants = as_dict(policy.get("grantControls"))
+        operator = checked(grants.get("operator"), {"AND", "OR"})
+        if operator:
+            props["grantOperator"] = operator
+        controls = grants.get("builtInControls")
+        known = {value for value in controls if checked(value, known_grants)} if isinstance(controls, list) else set()
+        strength = bool(as_dict(grants.get("authenticationStrength")))
+        if "block" in known:
+            props["authenticationGrant"] = "block"
+        elif "mfa" in known or strength:
+            alternative = bool(known - {"mfa"}) or any(
+                isinstance(grants.get(field), list) and grants[field] for field in ("termsOfUse", "customAuthenticationFactors")
+            )
+            if operator == "OR" and alternative:
+                props["authenticationGrant"] = "alternative"
+            elif operator == "AND" or (operator == "OR" and not alternative and isinstance(controls, list)
+                                       and all(checked(value, known_grants) for value in controls)):
+                props["authenticationGrant"] = "required"
+            else:
+                props["authenticationGrant"] = "configured"
+        if state == "enabled" and props.get("authenticationGrant") in {"alternative", "required", "block"}:
+            props["enabledAlternativeAuthentication"] = props["authenticationGrant"] == "alternative"
+        result.append({"id": policy_id, "type": "microsoft.graph/conditionalaccess", "group": None,
+                       "properties": props, "source": "ZIP — Conditional Access", "evidence_sources": {}})
+    return result
 
 
 def graph_config(config):

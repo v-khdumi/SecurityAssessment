@@ -110,6 +110,7 @@ FINDING_REFERENCES = {
     "MON-DIAG": ("diag", "threat-monitoring"),
     "DATA-REGION-EEA": ("regions", "recovery"),
     "ENTRA-CA-REPORT": ("ca-report", "ca-mfa"),
+    "ENTRA-CA-AUTH-OR": ("ca-mfa", "auth-strength"),
     "ENTRA-GUEST-INVITES": ("external",),
     "ENTRA-APP-REGISTRATION": ("app-roles",),
     "ENTRA-VOICE-SMS": ("auth-methods", "auth-strength"),

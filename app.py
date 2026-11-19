@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
                 prepared_archive = read_archive(upload)
             self.progress("evidence", "done", "Archive validated. The temporary upload is closed.")
             self.progress("prepare", "running", "Checking the ZIP for supported assessment evidence.")
-            if not prepared_archive[0]:
+            if not prepared_archive.config:
                 raise EvidenceError(
                     "No supported configuration was found in the ZIP. JSON filenames do not need to be changed. "
                     "Upload configuration data from a supported Graph endpoint or a normalized Azure inventory. "

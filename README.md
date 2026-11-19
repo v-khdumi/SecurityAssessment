@@ -52,11 +52,13 @@ The host checks `.json` files in the ZIP, including subfolders, and identifies s
 
 Include one document per tenant configuration type. Individual Teams responses can be spread across multiple JSON files. For Conditional Access, include the original Graph metadata or full policy objects with `id`, `state`, and `conditions` so the importer can distinguish them from other lists. One Azure inventory in the documented normalized format is supported. Limits: 512 MiB per archive, 4,000 entries, 32 MiB per JSON file checked, and 64 MiB across JSON files checked (uncompressed). For larger exports, split by assessment scope rather than splitting the bytes of a ZIP.
 
+**Summary → Archive import coverage** shows a decision for each file using its position in the ZIP directory, not its name or contents. The report marks skipped evidence and missing Azure or Microsoft 365 data as partial coverage. To print aggregated import reasons without calling Foundry or writing a report, run `python build.py --inspect-zip export.zip --confirm`. ZIP entry positions include directory entries; directories are not shown in the report.
+
 | Entry | Accepted evidence |
 |---|---|
 | `authorizationPolicy.json` | Graph `/policies/authorizationPolicy`: guest invitations and selected default member permissions. |
 | `authenticationMethodsPolicy.json` | Graph `/policies/authenticationMethodsPolicy`: supported method types and configuration states, not registrations for individuals. |
-| `conditionalAccessPolicies.json` | One Graph page `{"value": [...]}` from `/identity/conditionalAccess/policies`: counts by state only. It does not determine MFA coverage. The app does not follow `nextLink`. |
+| `conditionalAccessPolicies.json` | One Graph page `{"value": [...]}` from `/identity/conditionalAccess/policies`. Policies are assessed individually for report-only state and alternatives to an authentication grant, with available scope and exclusions as context. Only enum or boolean indicators go to Foundry; no identifiers or target lists are sent. The app does not follow `nextLink` or infer tenant-wide MFA coverage. |
 | `sharepointSettings.json` | [Graph `/admin/sharepoint/settings`](https://learn.microsoft.com/en-us/graph/api/sharepointsettings-get?view=graph-rest-1.0): selected SharePoint and OneDrive tenant settings. Accepts the settings object directly or inside `{"value": {...}}`. |
 | `teamsConfiguration.json` | A [Graph `GET /teams/{team-id}`](https://learn.microsoft.com/en-us/graph/api/team-get?view=graph-rest-1.0) response containing `id` and `guestSettings`, or `{"value": [...]}` wrapping those individual responses. The bulk `/teams` list by itself does not supply these settings. |
 | `assessment-v1.json` | Locally normalized configuration inventory, RBAC, optional function metadata, and approved aggregates. |

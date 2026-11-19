@@ -41,9 +41,9 @@ class EvidenceTests(unittest.TestCase):
     def test_selects_configuration_members_without_opening_logs(self):
         blob = archive(**{"assessment-v1.json": CONFIG, "auditLogs.json": "not JSON",
                           "signIns.json": "not JSON", "export/AuthorizationPolicy.json": "not JSON"})
-        config, skipped = read_archive(blob)
-        self.assertEqual(list(config), ["assessment-v1.json"])
-        self.assertEqual(skipped, 3)
+        imported = read_archive(blob)
+        self.assertEqual(list(imported.config), ["assessment-v1.json"])
+        self.assertEqual(imported.skipped, 3)
 
     def test_rejects_duplicate_configuration_names_across_folders(self):
         policy = {"allowInvitesFrom": "none"}
@@ -61,11 +61,11 @@ class EvidenceTests(unittest.TestCase):
             "exports/auditLogs/record.json": {"allowInvitesFrom": "everyone"},
             "ERRORS.ndjson": "not JSON",
         })
-        config, skipped = read_archive(blob)
-        self.assertEqual(set(config), {"assessment-v1.json", "sharepointSettings.json",
+        imported = read_archive(blob)
+        self.assertEqual(set(imported.config), {"assessment-v1.json", "sharepointSettings.json",
                                        "authorizationPolicy.json", "conditionalAccessPolicies.json"})
-        self.assertEqual(config["authorizationPolicy.json"]["allowInvitesFrom"], "none")
-        self.assertEqual(skipped, 3)
+        self.assertEqual(imported.config["authorizationPolicy.json"]["allowInvitesFrom"], "none")
+        self.assertEqual(imported.skipped, 3)
 
     def test_rejects_unsafe_paths_for_recognized_configuration(self):
         for path in ("../authorizationPolicy.json", "/export/authorizationPolicy.json", r"C:\export\authorizationPolicy.json"):
@@ -663,6 +663,52 @@ class LocalAppTests(unittest.TestCase):
                 self.assertIn(expected, events[-1]["payload"]["error"])
                 assess.assert_not_called()
         self.assertEqual(list(self.server.output.iterdir()), [])
+
+    def test_partial_archive_distinguishes_policy_findings_from_skipped_evidence(self):
+        private_id = "00000000-0000-0000-0000-000000000033"
+        files = {
+            "export/policies.json": {"value": [
+                {"id": SUB, "state": "enabledForReportingButNotEnforced", "displayName": "Private policy label",
+                 "conditions": {"users": {"includeUsers": ["All"], "excludeUsers": [private_id]}},
+                 "grantControls": {"operator": "AND", "builtInControls": ["mfa"]}},
+                {"id": "00000000-0000-0000-0000-000000000044", "state": "enabled", "conditions": {},
+                 "grantControls": {"operator": "OR", "builtInControls": ["mfa", "compliantDevice"]}},
+            ]},
+            "private-folder/api-error.json": {"error": {"message": "Private error details"}},
+            "SHA256SUMS": "ignored",
+        } | {f"private-folder/other-{i}.json": {"value": []} for i in range(23)}
+        self.server.setup = ConnectionSetup(foundry=MODEL)
+        headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
+                   "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0"}
+
+        def fake_open(request, **_):
+            payload = json.loads(request.data)
+            encoded = payload["input"][0]["content"]
+            for value in (SUB, private_id, "Private policy label", "Private error details", "private-folder"):
+                self.assertNotIn(value, encoded)
+            rows = json.loads(encoded)
+            report_only = next(row for row in rows if row["control"] == "ENTRA-CA-REPORT" and row["observed"])
+            self.assertEqual(report_only["policy_context"]["exclusionsObserved"], True)
+            alternative = next(row for row in rows if row["control"] == "ENTRA-CA-AUTH-OR")
+            self.assertEqual(alternative["policy_context"]["authenticationGrant"], "alternative")
+            return FoundryProtocolTests.response([
+                [row["id"], "finding", "Low", "EVIDENCE"] if row["observed"] else [row["id"], "no_finding", None, None]
+                for row in rows
+            ])
+
+        with patch("foundry_agents.build_opener") as opener:
+            opener.return_value.open.side_effect = fake_open
+            code, body = self.request("POST", self.prefix + "assess", archive(**files), headers)
+        self.assertEqual(code, 200, body)
+        result = json.loads(body)
+        self.assertEqual((result["eligible_files"], result["skipped"], result["findings"]), (1, 25, 2))
+        self.assertTrue(result["partial_import"])
+        report = (self.server.output / result["snapshot"] / "report.html").read_text(encoding="utf-8")
+        for expected in ("Partial assessment", "Archive import coverage", "API error response",
+                         "Conditional Access policy evidence", "Microsoft 365 configuration was not supplied"):
+            self.assertIn(expected, report)
+        for value in (SUB, private_id, "Private policy label", "Private error details", "private-folder"):
+            self.assertNotIn(value, report)
 
     def test_real_assessment_requires_key_and_agent_success(self):
         route = self.prefix + "assess"

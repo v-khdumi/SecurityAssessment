@@ -86,6 +86,8 @@ def invoke(connection: ModelConnection, role: str, evidence: list[dict]):
         "condition in finding_when. A list in finding_when means any of those values. Emit finding only if it does, "
         "no_finding if it does not, or insufficient if the "
         "evidence is indeterminate. Do not infer a breach, reachability, policy effectiveness, or compliance. "
+        "If policy_context is present, use only its supplied settings; missing fields are unknown. "
+        "For Conditional Access do not infer enforcement across policies or tenant-wide MFA coverage. "
         "For a finding select Low, Medium, or High, using typical_severity as a guide, and one question code. "
         'Return a JSON object with exactly one key "decisions". Its value must be an array of rows '
         '[id, "finding", "Medium", "allowed_question_code"], [id, "no_finding", null, null] '

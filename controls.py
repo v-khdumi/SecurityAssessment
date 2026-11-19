@@ -79,9 +79,13 @@ RULES = (
 )
 
 GRAPH_RULES = (
-    Rule("ENTRA-CA-REPORT", "Conditional Access policies in report-only mode", (), "reportOnlyPresent", True, "Low",
-         "Report-only policies do not enforce their configured controls.",
-         "Have the identity owner review outcomes, exclusions, and the intended enforcement date.", "fi", ("32",)),
+    Rule("ENTRA-CA-REPORT", "Conditional Access policy in report-only mode", ("microsoft.graph/conditionalaccess",),
+         "reportOnlyPresent", True, "Low", "This policy does not enforce its configured controls.",
+         "Have the identity owner review this policy's scope, exclusions, and intended enforcement date.", "fi", ("32",)),
+    Rule("ENTRA-CA-AUTH-OR", "Conditional Access authentication grant is one of multiple alternatives",
+         ("microsoft.graph/conditionalaccess",), "enabledAlternativeAuthentication", True, "Medium",
+         "For requests that match this enabled policy, another configured grant may satisfy this policy without its authentication grant.",
+         "Verify whether authentication must be required and review overlapping policies before changing the grant operator.", "ij", ("32",)),
     Rule("ENTRA-GUEST-INVITES", "Guest invitations allowed beyond designated roles", (), "guestInvitationPolicy",
          ("everyone", "adminsGuestInvitersAndAllMembers"), "Low",
          "A broader invitation policy can increase the need for external collaboration oversight.",
@@ -278,6 +282,15 @@ GUIDANCE = {
         "Review policy purpose, target identities and resources, grant controls, and exclusions in the approved identity process.",
         "Use report-only evaluation and a limited rollout before enforcing a policy. Preserve approved emergency access.",
         "Record the owner decision, validated outcomes, and the enforcement schedule or approved exception.",
+        ("policyState", "grantOperator", "authenticationGrant", "userScope", "applicationScope", "exclusionsObserved"),
+    ),
+    "ENTRA-CA-AUTH-OR": FindingGuidance(
+        "Identity and Conditional Access owners",
+        "This finding concerns one policy. Other policies may still require MFA or a specific authentication strength.",
+        "Compare the policy's configured grants and matching scope with the approved authentication requirement.",
+        "If authentication is mandatory, have the policy owner test a revised requirement in report-only mode before enforcing it.",
+        "Confirm that approved test identities see the expected grant requirements without affecting emergency access.",
+        ("policyState", "grantOperator", "authenticationGrant", "userScope", "applicationScope", "exclusionsObserved"),
     ),
     "ENTRA-GUEST-INVITES": FindingGuidance(
         "Identity and external collaboration owners",
