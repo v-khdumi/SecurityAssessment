@@ -8,6 +8,7 @@ import re
 import stat
 import zipfile
 import zlib
+from codecs import BOM_UTF16_BE, BOM_UTF16_LE, BOM_UTF32_BE, BOM_UTF32_LE, BOM_UTF8
 from dataclasses import dataclass
 from datetime import date
 
@@ -32,7 +33,7 @@ SHAREPOINT_FLAGS = ("isLegacyAuthProtocolsEnabled", "isResharingByExternalUsersE
                     "isRequireAcceptingUserToMatchInvitedUserEnabled", "isUnmanagedSyncAppForTenantRestricted")
 TEAM_GUEST_FLAGS = ("allowCreateUpdateChannels", "allowDeleteChannels")
 NON_CONFIGURATION_MEMBERS = {
-    "sha256sums", "error", "errors", "exporterrors", "signins", "signinlogs", "auditlogs",
+    "sha256sums", "sha256sumserrors", "error", "errors", "exporterrors", "signins", "signinlogs", "auditlogs",
     "directoryaudits", "applicationlogs",
 }
 GUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.I)
@@ -359,6 +360,90 @@ def configuration_document(document, conditional_access_hint=False):
     return None
 
 
+def structured_encoding(prefix):
+    for bom, encoding in ((BOM_UTF32_BE, "utf-32"), (BOM_UTF32_LE, "utf-32"),
+                          (BOM_UTF16_BE, "utf-16"), (BOM_UTF16_LE, "utf-16"), (BOM_UTF8, "utf-8-sig")):
+        if prefix.startswith(bom):
+            return encoding if prefix.decode(encoding, errors="replace").lstrip().startswith(("{", "[")) else None
+    return "utf-8" if prefix.lstrip().startswith((b"{", b"[")) else None
+
+
+def configuration_records(document, conditional_access_hint=False):
+    body = as_dict(document)
+    if "error" in body:
+        yield None, "API error response"
+        return
+    match = configuration_document(document, conditional_access_hint)
+    if match is not None:
+        name, configuration = match
+        if name == "teamsConfiguration.json":
+            teams = configuration["value"]
+            supported = [team for team in teams if as_dict(team.get("guestSettings")).keys() & set(TEAM_GUEST_FLAGS)]
+            if len(supported) != len(teams):
+                yield None, "Teams record has no supported guest configuration"
+                match = name, {"value": supported}
+        yield match, None
+        return
+    batch = body.get("responses")
+    if isinstance(batch, list) and all(type(as_dict(row).get("status")) is int for row in batch):
+        if len(batch) > MAX_ROWS:
+            raise EvidenceError("The Graph batch exceeds the row limit.")
+        for row in batch:
+            if not 200 <= row["status"] < 300 or "error" in as_dict(row.get("body")):
+                yield None, "API error response"
+                continue
+            match = configuration_document(row.get("body"))
+            yield match, None if match is not None else "Batch body has no supported configuration"
+        if not batch:
+            yield None, "Empty Graph batch"
+        return
+    records = body.get("value", document)
+    if isinstance(records, list) and records:
+        for record in records:
+            match = configuration_document(record)
+            yield match, None if match is not None else "Collection item has no supported configuration"
+        return
+    yield None, "JSON content has no supported configuration"
+
+
+def json_documents(raw, encoding):
+    try:
+        document = parse_json(raw)
+    except EvidenceError:
+        try:
+            lines = io.StringIO(raw.decode(encoding))
+        except UnicodeError:
+            yield None, "Invalid JSON"
+            return
+        for index, line in enumerate(lines, start=1):
+            if index > MAX_ROWS:
+                raise EvidenceError("The newline-delimited JSON exceeds the line limit.")
+            if not line.strip():
+                continue
+            try:
+                document = parse_json(line)
+            except EvidenceError:
+                yield None, "Invalid JSON"
+                continue
+            yield document, None
+    else:
+        yield document, None
+
+
+def add_configuration(config, name, body):
+    if name not in config:
+        config[name] = body
+        return
+    if name not in {"teamsConfiguration.json", "conditionalAccessPolicies.json"}:
+        raise EvidenceError(f"The ZIP contains more than one {name} configuration. Include only one copy, even across folders.")
+    entries = config[name]["value"]
+    if len(entries) + len(body["value"]) > MAX_ROWS:
+        raise EvidenceError(f"The combined {name} configurations exceed the row limit.")
+    entries.extend(body["value"])
+    if "@odata.nextLink" in body:
+        config[name]["@odata.nextLink"] = None
+
+
 def read_archive(source):
     file = io.BytesIO(source) if isinstance(source, bytes) else source
     size = file.seek(0, io.SEEK_END)
@@ -380,57 +465,62 @@ def read_archive(source):
                 if not filename:
                     continue
                 excluded = any(
-                    re.sub(r"[-_ .]", "", part.lower().removesuffix(".json")) in NON_CONFIGURATION_MEMBERS for part in parts
+                    re.sub(r"[-_ .]", "", re.sub(r"\.(?:json|ndjson|jsonl)$", "", part.lower()))
+                    in NON_CONFIGURATION_MEMBERS for part in parts
                 )
-                if excluded or not filename.lower().endswith(".json"):
+                if excluded:
                     skipped += 1
-                    decisions.append((index, "Skipped", "Excluded log, error, or checksum" if excluded else "Not a JSON file"))
+                    decisions.append((index, "Skipped", "Excluded log, error, or checksum"))
                     continue
                 if "" in parts or ".." in parts or any(":" in part for part in parts) or "\x00" in entry.orig_filename:
-                    raise EvidenceError("The ZIP contains an unsafe path for a JSON file.")
+                    raise EvidenceError("The ZIP contains an unsafe path for a file.")
                 mode = entry.external_attr >> 16
+                if entry.flag_bits & 1 or stat.S_ISLNK(mode):
+                    raise EvidenceError("A ZIP entry is encrypted or unsafe to expand.")
                 if entry.file_size > MAX_MEMBER:
-                    raise EvidenceError(f"A JSON file exceeds {MAX_MEMBER // MIB} MiB uncompressed. Split by assessment scope.")
-                if entry.flag_bits & 1 or stat.S_ISLNK(mode) or entry.file_size > max(1, entry.compress_size) * 200:
-                    raise EvidenceError("A JSON entry is encrypted or unsafe to expand.")
-                parsed_bytes += entry.file_size
-                if parsed_bytes > MAX_CONFIG_BYTES:
-                    raise EvidenceError(f"JSON files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
+                    skipped += 1
+                    decisions.append((index, "Skipped", f"File exceeds {MAX_MEMBER // MIB} MiB uncompressed"))
+                    continue
+                if entry.file_size > max(1, entry.compress_size) * 200:
+                    skipped += 1
+                    decisions.append((index, "Skipped", "File exceeds the safe expansion ratio"))
+                    continue
                 with archive.open(entry) as stream:
-                    raw = stream.read(MAX_MEMBER + 1)
-                try:
-                    document = parse_json(raw)
-                except EvidenceError:
-                    if filename in MEMBERS:
-                        raise
+                    prefix = stream.read(4096)
+                    encoding = structured_encoding(prefix)
+                    if encoding is None:
+                        if filename in MEMBERS:
+                            raise EvidenceError("A recognized configuration file contains invalid JSON.")
+                        skipped += 1
+                        decisions.append((index, "Skipped", "Not recognized as structured JSON"))
+                        continue
+                    parsed_bytes += entry.file_size
+                    if parsed_bytes > MAX_CONFIG_BYTES:
+                        raise EvidenceError(f"JSON files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
+                    raw = prefix + stream.read(MAX_MEMBER + 1 - len(prefix))
+                imported = set()
+                omitted = set()
+                for document, reason in json_documents(raw, encoding):
+                    if reason is not None:
+                        omitted.add(reason)
+                        continue
+                    for match, reason in configuration_records(document, filename == "conditionalAccessPolicies.json"):
+                        if match is not None:
+                            name, body = match
+                            add_configuration(config, name, body)
+                            imported.add(name)
+                        else:
+                            omitted.add(reason)
+                if not imported:
+                    if filename in MEMBERS and omitted == {"Invalid JSON"}:
+                        raise EvidenceError("A recognized configuration file contains invalid JSON.")
                     skipped += 1
-                    decisions.append((index, "Skipped", "Invalid JSON"))
+                    decisions.append((index, "Skipped", "; ".join(sorted(omitted or {"No supported records"}))))
                     continue
-                match = configuration_document(document, filename == "conditionalAccessPolicies.json")
-                if match is None:
-                    skipped += 1
-                    body = as_dict(document)
-                    if "error" in body:
-                        reason = "API error response"
-                    elif isinstance(body.get("responses"), list):
-                        reason = "Unsupported batch response; export individual response bodies"
-                    elif isinstance(body.get("value", document), list):
-                        reason = "JSON collection has no supported configuration"
-                    else:
-                        reason = "JSON content has no supported configuration"
-                    decisions.append((index, "Skipped", reason))
-                    continue
-                name, body = match
-                if name in config:
-                    if name != "teamsConfiguration.json":
-                        raise EvidenceError(f"The ZIP contains more than one {name} configuration. Include only one copy, even across folders.")
-                    entries = config[name]["value"]
-                    if len(entries) + len(body["value"]) > MAX_ROWS:
-                        raise EvidenceError("The combined Teams configurations exceed the row limit.")
-                    entries.extend(body["value"])
-                else:
-                    config[name] = body
-                decisions.append((index, "Imported", name))
+                details = ", ".join(sorted(imported))
+                if omitted:
+                    details += "; omitted: " + "; ".join(sorted(omitted))
+                decisions.append((index, "Partial" if omitted else "Imported", details))
             return ArchiveImport(config, skipped, decisions)
     except (zipfile.BadZipFile, NotImplementedError, OSError, RuntimeError, EOFError, zlib.error) as exc:
         raise EvidenceError("The ZIP archive could not be opened safely.") from exc

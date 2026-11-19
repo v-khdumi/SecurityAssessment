@@ -67,6 +67,43 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(imported.config["authorizationPolicy.json"]["allowInvitesFrom"], "none")
         self.assertEqual(imported.skipped, 3)
 
+    def test_reads_extensionless_configuration_and_reports_mixed_ndjson(self):
+        blob = archive(**{
+            "export/payload": CONFIG,
+            "export/stream.dat": '{"allowInvitesFrom":"none"}\n{"error":{"message":"Do not echo this"}}\n',
+            "export/checksum.txt": "not structured data",
+        })
+        imported = read_archive(blob)
+        self.assertEqual(set(imported.config), {"assessment-v1.json", "authorizationPolicy.json"})
+        self.assertEqual(imported.skipped, 1)
+        self.assertEqual(imported.decisions, [
+            (1, "Imported", "assessment-v1.json"),
+            (2, "Partial", "authorizationPolicy.json; omitted: API error response"),
+            (3, "Skipped", "Not recognized as structured JSON"),
+        ])
+
+    def test_imports_conditional_access_from_multiple_pages_without_following_links(self):
+        blob = archive(**{
+            "exports/page-one": {"value": [{"id": SUB, "state": "enabled", "conditions": {}}],
+                                 "@odata.nextLink": "https://example.test/never-follow"},
+            "exports/page-two.dat": {"value": [{"id": "00000000-0000-0000-0000-000000000022",
+                                              "state": "enabledForReportingButNotEnforced", "conditions": {}}]},
+        })
+        imported = read_archive(blob)
+        policies = imported.config["conditionalAccessPolicies.json"]
+        self.assertEqual(len(policies["value"]), 2)
+        self.assertIsNone(policies["@odata.nextLink"])
+        self.assertEqual([status for _, status, _ in imported.decisions], ["Imported", "Imported"])
+
+    def test_accounts_for_oversized_members_without_reading_them(self):
+        blob = archive(**{"oversized.bin": " " * 2049, "policy": {"allowInvitesFrom": "none"}})
+        with patch("evidence.MAX_MEMBER", 2048):
+            imported = read_archive(blob)
+        self.assertEqual(imported.skipped, 1)
+        self.assertEqual(imported.decisions[0][:2], (1, "Skipped"))
+        self.assertIn("uncompressed", imported.decisions[0][2])
+        self.assertIn("authorizationPolicy.json", imported.config)
+
     def test_rejects_unsafe_paths_for_recognized_configuration(self):
         for path in ("../authorizationPolicy.json", "/export/authorizationPolicy.json", r"C:\export\authorizationPolicy.json"):
             with self.subTest(path=path), self.assertRaisesRegex(EvidenceError, "unsafe path"):
@@ -500,8 +537,12 @@ class LocalAppTests(unittest.TestCase):
 
     def test_foundry_assesses_microsoft_365_only_archive_without_exporting_teams_or_domain_identity(self):
         blob = archive(**{
-            "export/m365/settings.json": {"value": {"sharingCapability": "externalUserAndGuestSharing",
-                "isLegacyAuthProtocolsEnabled": True, "sharingAllowedDomainList": ["excluded-domain.example.test"]}},
+            "export/m365/settings.batch": {"responses": [
+                {"status": 200, "body": {"value": {"sharingCapability": "externalUserAndGuestSharing",
+                    "isLegacyAuthProtocolsEnabled": True, "sharingAllowedDomainList": ["excluded-domain.example.test"]}}},
+                {"status": 403, "body": {"error": {"message": "Excluded error message"}}},
+                {"status": 200, "body": {"value": [{"displayName": "Excluded unrelated record"}]}},
+            ]},
             r"export\m365\teams.json": {"value": [{"id": SUB, "displayName": "Excluded Team Name",
                 "guestSettings": {"allowDeleteChannels": True}}, {"id": "00000000-0000-0000-0000-000000000022"}]},
             "SHA256SUMS": "not JSON",
@@ -516,7 +557,8 @@ class LocalAppTests(unittest.TestCase):
             payload = json.loads(request.data)
             self.assertIn("Agent: Compliance", payload["instructions"])
             encoded = payload["input"][0]["content"]
-            for value in (SUB, "Excluded Team Name", "excluded-domain.example.test"):
+            for value in (SUB, "Excluded Team Name", "excluded-domain.example.test",
+                          "Excluded error message", "Excluded unrelated record"):
                 self.assertNotIn(value, encoded)
             rows = json.loads(encoded)
             self.assertEqual({row["control"]: row["observed"] for row in rows},
@@ -531,12 +573,15 @@ class LocalAppTests(unittest.TestCase):
         result = json.loads(body)
         self.assertEqual((result["resources"], result["m365_observations"], result["findings"]), (0, 3, 3))
         self.assertEqual((result["eligible_files"], result["skipped"]), (2, 3))
+        self.assertEqual(result["partial_files"], 2)
         report = (self.server.output / result["snapshot"] / "report.html").read_text(encoding="utf-8")
         self.assertIn("Microsoft 365 decisions from Foundry", report)
         self.assertIn("The total also includes Microsoft 365 findings.", report)
         self.assertNotIn(SUB, report)
         self.assertNotIn("Excluded Team Name", report)
         self.assertNotIn("excluded-domain.example.test", report)
+        self.assertNotIn("Excluded error message", report)
+        self.assertNotIn("Excluded unrelated record", report)
 
     def test_uploaded_system_has_matching_resource_and_finding_counts(self):
         tables, _, _ = build.dataset(archive(**REPORT_FIXTURE), None, {}, {},

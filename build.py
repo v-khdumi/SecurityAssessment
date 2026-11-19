@@ -277,8 +277,10 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                     observed[rule.key] += 1
     has_evidence = bool(resources or rbac or graph or m365 or costs or posture or functions
                         or any(row[4] in {"pass", "fail"} for row in checks))
+    partial_files = sum(status == "Partial" for _, status, _ in archive.decisions) if archive is not None else 0
     summary = {"resources": len(resources), "findings": len(active), "high": counts["High"],
                "skipped": skipped, "eligible_files": len(config), "graph_observations": len(graph),
+               "partial_files": partial_files,
                "m365_observations": sum(len(scope["properties"]) for scope in m365),
                "controls_with_evidence": len(observed), "available_controls": len(RULES),
                "priority": priority,
@@ -286,7 +288,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                "analysis_mode": "Foundry" if model_selected else "Local rules",
                "model_evidence_rows": len(model_rows), "model_patterns": model_pattern_count,
                "foundry_requests": len(foundry_receipts),
-               "partial_import": skipped > 0 or (uploaded and (not resources or not m365)),
+               "partial_import": skipped > 0 or partial_files > 0 or (uploaded and (not resources or not m365)),
                "model_insufficient": sum(row[-2] == "insufficient" for row in model_rows)}
     attention = [
         ("Breach status", "Not assessed. These sources neither confirm nor rule out an incident."),
@@ -295,6 +297,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         ("High", counts["High"]), ("Medium", counts["Medium"]), ("Low", counts["Low"]),
         ("Subscriptions observed", len(subs)), ("Resource groups observed", len(groups)),
         ("Recognized configuration types", len(config)), ("Entries skipped", skipped),
+        ("Entries partially imported", partial_files),
         ("Graph configuration observations", len(graph)),
         ("Microsoft 365 configuration observations", summary["m365_observations"]),
         ("Resource controls with evidence", len(observed)),
