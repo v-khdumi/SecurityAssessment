@@ -1,0 +1,148 @@
+You have read-only access (Reader at the Tenant Root Group) to the Azure tenant
+xxxxxx.onmicrosoft.com through the Azure CLI. Build a due-diligence
+inventory and security review of every subscription. Do not attempt any write
+operation and do not read data-plane content (secrets, app settings values,
+connection strings, blobs, database contents).
+
+1. GDPR rules for the whole process
+These apply to every step below and override any other instruction.
+- Purpose limitation: collect only what is needed to assess configuration and
+  security. This is a review of systems, not of people.
+- Data minimisation: collect configuration metadata only. Never query, sample
+  or export customer, employee or shipment data, and never read logs that
+  contain it (application logs, request logs with URLs or client IPs, sign-in
+  logs, audit log caller details).
+- Personal data in metadata: treat names, e-mail addresses, UPNs, usernames,
+  personal IP addresses and phone numbers as personal data wherever they
+  appear (RBAC principals, last deployer, resource creators, tags, alert
+  entities, firewall rule names, free-text descriptions). Keep principals as
+  object IDs with their type; replace any other identifier of a person with a
+  pseudonym or drop the field. Do not resolve object IDs to names.
+- If personal data is met by accident, do not copy it into scripts output,
+  CSVs, the report or this conversation. Record only that the field exists
+  and where, as a finding.
+- Storage and retention: keep raw snapshots and CSVs only in the agreed
+  project folder on a Company-managed device, with access limited to the
+  review team. Propose a retention period for each snapshot and a deletion
+  step in the scripts; do not upload outputs to any external service.
+- Security of processing (Art. 32): use only the dedicated review account,
+  never store credentials or tokens in scripts or output, and log every
+  command run so the collection is auditable.
+- Accountability: produce a short "Data protection" note listing what was
+  collected, what was deliberately not collected, where it is stored, who can
+  access it and when it is deleted, so the DPO can add it to the records of
+  processing (Art. 30) and judge whether a DPIA (Art. 35) is needed.
+- Before the first run, list the data categories you intend to collect and
+  stop for confirmation.
+
+2. Collection
+- Write re-runnable scripts: scripts/collect.sh (read-only az calls) and
+  build.py (transform + report). Each run produces a dated snapshot and CSVs
+  under csv/<area>/.
+- Sources: Azure Resource Graph first; ARM GET for detail Resource Graph does
+  not expose; Cost Management query API; Azure Monitor metrics (aggregates
+  only) for 30-day usage.
+- Cross-check Resource Graph against ARM resource lists and mark anything found
+  in only one source.
+- Cover: subscriptions, resource groups, all resources, RBAC, networking,
+  App Service and Functions (section 3), databases incl. Arc SQL, storage, AKS
+  and container registries, integration (Service Bus, API Management, Data
+  Factory, Logic Apps), VMs, Key Vaults and identities, Automation, monitoring
+  and diagnostic settings, backups, Defender for Cloud, Azure Policy, cost.
+- build.py applies the section 1 pseudonymisation before anything is written
+  to CSV or HTML, and fails the build if an e-mail address or UPN pattern is
+  found in the output.
+- Group resource groups into business systems in scripts/system_map.csv
+  (inferred from names; owners will correct it). Add a column marking which
+  systems are likely to process personal data, to be confirmed by owners.
+
+3. App Service deep dive
+For every web app, function app and deployment slot, collect one row with:
+- Exposure: public network access, access restriction rules, private
+  endpoints, custom domains, and the same separately for the deployment
+  (Kudu/SCM) site.
+- Authentication: Easy Auth and providers; for function apps, list every
+  function with trigger, auth level and disabled state, and flag enabled HTTP
+  functions with anonymous auth level.
+- Security configuration: HTTPS only, minimum TLS (main and SCM), FTP state,
+  FTP and SCM basic-auth publishing, remote debugging, HTTP/2, client
+  certificates, CORS allowing any origin, detailed errors.
+- Secrets and identity: managed identity, Key Vault reference identity,
+  setting NAMES only (never values), flag secret-like sticky setting names and
+  secrets visible in tags or metadata.
+- Deployment: source type, repository URL and host, branch, pipeline
+  (Azure DevOps / GitHub Actions / manual), last deployment date and status.
+  Record the last deployer only as "pipeline", "service principal" or
+  "user (pseudonymised)", never as a name or address.
+- Runtime: stack, version, end-of-support date and status (out of support,
+  ending within 120 days, supported); flag legacy PHP left enabled.
+- Plans and scaling: plan, tier, SKU, workers, Always On, health check,
+  auto-heal, autoscale, zone redundancy, oversized or empty plans.
+- Resilience: backups and last backup, Traffic Manager, single-instance and
+  single-region production apps.
+- Logging and usage: HTTP logging, diagnostic settings, request, 4xx and 5xx
+  counts over 30 days (counts only, no log lines); flag idle apps.
+- Access: RBAC assignments per app, direct assignments, and principals whose
+  roles let them read secrets or deploy code.
+Also list Logic Apps (incl. publicly triggerable ones) and API connections.
+Present as an "Apps" tab: headline counts, then Exposure, HTTP functions
+without a key, Security configuration, Secrets, Deployment and source control,
+Runtimes, Plans and scaling, Resilience, Logic Apps, Access, All apps.
+
+4. Findings
+- Derive findings with a stable key, severity (High/Medium/Low), why it
+  matters, count, affected resources with detail, and a recommended action.
+- Raise severity one level where the affected system is marked as likely to
+  process personal data, and say so in the finding.
+- Roll up cost, exposure and findings per system, with a risk matrix.
+- Assess resilience and DR per system from configuration (zones, region
+  redundancy, replicas, backups, delete protection). State that these are
+  capabilities, not tested outcomes, which DORA expects to be rehearsed.
+
+5. Compliance mapping
+- CIS Microsoft Azure Foundations: run Prowler, report each requirement as
+  pass, fail, manual review, needs Entra access or not applicable, filterable
+  by benchmark, section and status. State the Prowler version and exclusions.
+- NIS2 Article 21(2): for each measure (a) to (j), show two views side by side:
+  (1) this review's findings mapped to the measure, counted by severity;
+  (2) Prowler's NIS2 checks (based on Implementing Regulation (EU) 2024/2690),
+      pass / fail / other.
+- Publish the finding-to-measure mapping as its own filterable table (point,
+  measure, finding, severity, affected items) so reviewers can challenge it.
+  A finding may map to more than one measure; every finding must map to at
+  least one.
+- GDPR: add a third mapping table, finding to GDPR article, limited to what
+  configuration can evidence:
+  Art. 5(1)(e) storage limitation (retention settings, stale backups, orphaned
+  data stores); Art. 5(1)(f) and Art. 32 security of processing (encryption at
+  rest and in transit, access control, public exposure, logging, backup and
+  restore capability); Art. 25 data protection by design and by default
+  (anonymous access, default-open network rules, production data in dev/test
+  environments); Art. 28 processors (third-party integrations, cross-tenant
+  access, external repositories); Art. 33 breach detection capability
+  (Defender plans, alerting, log retention); Art. 44-49 international
+  transfers (resources, replicas and backups located outside the EU/EEA).
+- State plainly that technical configuration is only part of NIS2 and GDPR:
+  policies, training, supplier contracts, lawful basis, data-subject rights
+  and incident procedures are not visible in Azure and are out of scope. The
+  mapping is an aid for the DPO and legal team, not a compliance verdict.
+- Include Defender for Cloud secure score, plans, open recommendations and
+  alerts (withhold alert entities and descriptions), and Azure Policy
+  assignments and compliance.
+
+6. Output
+- One self-contained HTML report, "Azure Tenant Inventory", light and dark
+  theme, sticky tabs: Summary (what needs attention), Systems, Resilience & DR,
+  Findings, Resources, Resource groups, Access (RBAC), Security posture,
+  Network, Databases, Storage, Apps, Containers, Integration, Servers,
+  Secrets & identities, Monitoring & logging, Cost, Method and limits.
+- Security posture tab carries the CIS, NIS2 and GDPR mappings.
+- Summary first, every table filterable, IDs and figures in monospace.
+- "Method and limits" tab: identity and role used, snapshot date, sources,
+  completeness check, what Reader cannot see (Entra ID, so principals stay
+  object IDs; data plane; separate B2C tenants; retired classic admin API),
+  and the "Data protection" note from section 1.
+- The report contains no names, e-mail addresses or other direct identifiers
+  of individuals, and no free-text fields that could carry them. Mark it
+  "Confidential - internal" and name the intended audience.
+- Every finding needs owner confirmation before anyone acts on it.

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Azure Tenant Assessment</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="ui.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <div class="brand">
+        <svg class="brand-mark" width="38" height="38" viewBox="0 0 38 38" fill="none" aria-hidden="true">
+          <rect x="1" y="1" width="36" height="36" rx="10" stroke="currentColor" opacity=".55"/>
+          <path d="M19 9 28 13.5v6c0 4.2-3.1 7.5-9 10.1-5.9-2.6-9-5.9-9-10.1v-6L19 9Z" stroke="currentColor" stroke-width="1.6"/>
+          <path d="m15.4 19.3 2.4 2.4 4.9-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div><p class="eyebrow">Azure security</p><p class="brand-name">Assessment workspace</p></div>
+      </div>
+      <div class="masthead-actions">
+        <span class="local-badge"><span aria-hidden="true"></span> Local workspace</span>
+        <button id="open-setup" class="setup-trigger" type="button" aria-haspopup="dialog">
+          <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="5" r="1.5" fill="currentColor"/><circle cx="11" cy="9" r="1.5" fill="currentColor"/><circle cx="6" cy="13" r="1.5" fill="currentColor"/></svg>
+          Setup
+        </button>
+      </div>
+    </header>
+    <section class="hero" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">Confidential / Internal use</p>
+        <h1 id="page-title">Azure Tenant Assessment</h1>
+        <p class="lede">Assess configuration with Foundry. Keep your archive and reports on this device.</p>
+      </div>
+      <p class="hero-note">Configuration review, not breach detection. Findings need owner confirmation.</p>
+    </section>
+    <div class="grid">
+      <section aria-labelledby="input-title" class="card">
+        <p class="eyebrow"><span class="step">01</span> Evidence</p>
+        <h2 id="input-title">Start with a configuration ZIP</h2>
+        <p class="source-intro">Foundry assesses approved configuration indicators. The original ZIP, resource IDs, and report stay local.</p>
+        <div class="upload-box">
+          <label for="archive">Configuration ZIP <span class="muted">(up to 24 MiB)</span></label>
+          <input id="archive" type="file" accept=".zip,application/zip" aria-describedby="archive-help">
+          <p class="muted" id="archive-help">Only recognized configuration files are read. Do not rename sign-in, audit, or application logs.</p>
+        </div>
+        <div class="sample-bar">
+          <a href="sample" download="azure-graph-sample.zip">Download sample ZIP</a>
+          <button id="review-sample" type="button" class="link-button" disabled>Try the sample offline</button>
+        </div>
+        <p id="foundry-status" class="source-status" aria-live="polite">Checking review agent setup...</p>
+        <details class="online-options">
+          <summary>Optional: collect live Azure settings</summary>
+          <section class="source-option" aria-labelledby="azure-label">
+            <div class="source-heading">
+              <label class="option-label"><input type="checkbox" id="azure" aria-describedby="azure-help azure-status" disabled><span id="azure-label">Collect current settings from Azure</span></label>
+              <span class="source-status" id="azure-status" aria-live="polite">Checking setup...</span>
+            </div>
+            <p id="azure-help">Use this to check how Azure is configured now, with or without a ZIP. It reads resource inventory, access assignments, and App Service security settings, but not app setting values or log entries. It does not change Azure resources.</p>
+            <p class="muted">Set the tenant in Setup. A dedicated Azure CLI account with read access is required; the app does not sign you in.</p>
+            <p id="pilot-scope" class="muted" hidden>Live collection is limited to one pilot subscription.</p>
+          </section>
+        </details>
+        <div class="run-bar">
+          <button id="review" class="primary" type="button" disabled><span id="review-label">Review and confirm</span> <span aria-hidden="true">&rarr;</span></button>
+          <p id="status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+      <section aria-labelledby="mandate-title" class="card">
+        <p class="eyebrow"><span class="step">02</span> Review scope</p>
+        <h2 id="mandate-title">Assessment mandate</h2>
+        <p class="muted">The full mandate appears below. Evidence that cannot be collected safely is marked as not assessed.</p>
+        <pre id="mandate" tabindex="0" aria-label="Full mandate">Loading the mandate...</pre>
+      </section>
+    </div>
+    <section id="progress" class="card" hidden aria-labelledby="progress-title">
+      <div class="report-header">
+        <div><p class="eyebrow">Run activity</p><h2 id="progress-title">Assessment progress</h2></div>
+        <span id="run-time" class="source-status"></span>
+      </div>
+      <ol id="progress-steps" class="progress-steps" aria-live="polite"></ol>
+    </section>
+    <section id="result" class="card" hidden aria-labelledby="report-title">
+      <div class="report-header">
+        <div><p class="eyebrow">03 · Assessment results</p><h2 id="report-title" tabindex="-1">Azure Tenant Inventory</h2></div>
+        <div class="actions">
+          <a id="download" class="button-link" referrerpolicy="no-referrer">Download HTML</a>
+          <a id="open-report" class="primary" target="_blank" rel="noopener noreferrer">Open full report <span aria-hidden="true">&nearr;</span></a>
+        </div>
+      </div>
+      <p id="result-notice" class="result-notice" hidden></p>
+      <div class="result-metrics">
+        <div><b id="metric-high"></b>High-priority findings</div>
+        <div><b id="metric-findings"></b>Total findings</div>
+        <div><b id="metric-resources"></b>Resources observed</div>
+        <div><b id="metric-graph"></b>Graph observations</div>
+      </div>
+      <div class="result-grid">
+        <section aria-labelledby="priority-title">
+          <h3 id="priority-title">Review first</h3>
+          <ul id="priorities" class="priorities"></ul>
+          <p id="no-priority" class="muted" hidden>No findings were produced from the evidence available. Check coverage before drawing conclusions.</p>
+          <a id="open-findings" target="_blank" rel="noopener noreferrer">Open all findings <span aria-hidden="true">&nearr;</span></a>
+        </section>
+        <section aria-labelledby="coverage-title" class="result-coverage">
+          <h3 id="coverage-title">Evidence and limits</h3>
+          <p id="result-coverage"></p>
+          <p id="result-sources"></p>
+          <p id="result-ai" class="muted"></p>
+          <p class="muted">Breach status: not assessed. Findings require owner confirmation.</p>
+        </section>
+      </div>
+    </section>
+  </main>
+  <dialog id="setup-dialog" class="setup-dialog" aria-labelledby="setup-title">
+    <form id="setup-form" autocomplete="off">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">Workspace settings</p>
+          <h2 id="setup-title">Connection setup</h2>
+          <p class="muted">Connect the two built-in review agents to your Azure OpenAI deployment. Saving does not make a cloud call.</p>
+        </div>
+        <button id="close-setup" class="icon-button" type="button" aria-label="Close setup">&times;</button>
+      </header>
+      <div class="setup-body">
+        <section class="setup-section" aria-labelledby="setup-foundry-title">
+          <h3 id="setup-foundry-title">Azure OpenAI <span class="muted">(API key)</span></h3>
+          <dl class="agent-roles">
+            <dt>Security Posture</dt><dd>Suggests what resource owners should verify.</dd>
+            <dt>Compliance</dt><dd>Suggests what evidence and scope reviewers should confirm.</dd>
+          </dl>
+          <p class="field-help">No agent creation or Entra sign-in for AI review. Use a resource endpoint and an existing Responses API deployment, not a Foundry project URL.</p>
+          <fieldset id="model-fields" class="field-grid" aria-label="Azure OpenAI credentials">
+            <div class="wide"><label for="model-endpoint">Azure OpenAI resource endpoint</label><input id="model-endpoint" type="url" placeholder="https://resource.openai.azure.com" required maxlength="250"></div>
+            <div><label for="model-deployment">Model deployment name</label><input id="model-deployment" type="text" placeholder="review-model-1.2" required maxlength="63" spellcheck="false"></div>
+            <div><label for="model-key">Azure OpenAI API key</label><input id="model-key" type="password" maxlength="512" autocomplete="off" spellcheck="false" aria-describedby="key-help"></div>
+            <p id="key-help" class="field-help wide">Kept only in this app's memory. Never written to disk or included in a report.</p>
+          </fieldset>
+        </section>
+        <section class="setup-section" aria-labelledby="setup-azure-title">
+          <h3 id="setup-azure-title">Live Azure inventory <span class="muted">(optional)</span></h3>
+          <label for="azure-tenant">Azure tenant ID</label>
+          <input id="azure-tenant" type="text" placeholder="00000000-0000-0000-0000-000000000000" maxlength="36" spellcheck="false" aria-describedby="azure-tenant-help">
+          <p id="azure-tenant-help" class="field-help">Uses the dedicated read-only Azure CLI session. Leave blank to disable live inventory.</p>
+        </section>
+        <p id="setup-error" class="setup-error" role="alert"></p>
+      </div>
+      <footer class="dialog-footer">
+        <span class="muted">Cleared when the app stops.</span>
+        <div class="actions"><button id="cancel-setup" type="button">Cancel</button><button id="save-setup" class="primary" type="submit" disabled>Save setup</button></div>
+      </footer>
+    </form>
+  </dialog>
+  <dialog id="consent" aria-labelledby="consent-title">
+    <p class="eyebrow">Run approval</p>
+    <h2 id="consent-title">Review the data categories before running</h2>
+    <ul id="categories"></ul>
+    <p class="muted">The assessment does not collect sign-in, audit, or application logs, operational personal data, secrets, or settings values. The report and CSV files stay in the approved local directory.</p>
+    <label class="choice"><input id="confirmed" type="checkbox"><span id="confirm-label">I have read the mandate. I approve these categories and confirm that the recognized files contain only permitted configuration evidence and that the local folder is approved.</span></label>
+    <div class="actions"><button id="cancel" type="button">Cancel</button><button id="start" class="primary" type="button" disabled>Start assessment</button></div>
+  </dialog>
+  <dialog id="login" aria-labelledby="login-title">
+    <p class="eyebrow">Manual action · Azure CLI</p>
+    <h2 id="login-title">Sign-in required</h2>
+    <p id="login-message"></p>
+    <p class="muted">This app does not start sign-in or receive credentials. The button below only displays the command to run in your company terminal.</p>
+    <pre id="login-command" hidden></pre>
+    <div class="actions"><button id="login-close" type="button">Close</button><button id="login-show" type="button" class="primary">I agree — show the command</button></div>
+  </dialog>
+</body>
+</html>

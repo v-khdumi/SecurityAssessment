@@ -1,0 +1,150 @@
+# Azure Tenant Assessment with Microsoft Foundry
+
+This application reviews Azure configuration and security posture. It does not confirm or rule out a breach. The full assessment mandate is visible before a run. For an approved assessment, Foundry evaluates a minimal set of configuration indicators; ZIP files, identifiers, logs, and reports stay on the company-managed device. The application makes no Azure or Foundry calls before approval.
+
+## Run locally
+
+Use Python 3.10 or later. No additional Python packages are required. Before loading an archive, choose an **existing, company-approved local directory** on an encrypted device. Restrict its permissions to the assessment team and make sure it does not sync to an external service. The application does not configure access controls for you.
+
+Do not commit real input archives, snapshots, credentials, or populated system mappings. The repository includes only the synthetic sample archive and an empty mapping template.
+
+```powershell
+python -B .\app.py --output 'C:\Company\AzureReview\Snapshots'
+```
+
+Open the loopback address printed in the terminal; do not share it. For a real assessment in the UI, configure the agents' Azure OpenAI connection in **Setup**, select a configuration ZIP, and choose **Review and confirm**. Foundry determines the findings for each supported evidence category. The optional **Collect current settings from Azure** checkbox also reads live tenant configuration, using a separate read-only Azure CLI session.
+
+Saving setup makes no cloud calls. **Configured; access not tested** means only that local settings are present. For live inventory, if a CLI session is missing, a separate dialog asks before showing the sign-in command. The app never starts sign-in or requests sign-in credentials or MFA codes.
+
+Each run writes a dated directory containing `report.html` (self-contained, with tabs, searchable tables, and light/dark themes), `snapshot.json`, and `csv\<area>\`. The original ZIP is not saved or extracted. If an archive contains only event logs, the report states that no usable configuration evidence was found, not that no risk exists.
+
+The workspace starts with the highest-priority findings and a coverage summary. **Open full report** opens a separate page, and **Open all findings** jumps to searchable cards. Expand **Evidence and remediation plan** to see the observed value and source, corroborating and missing settings, severity rationale, suggested owners, and control-specific verification, change planning, and closure criteria. The same guidance is included in `csv\findings\details.csv`.
+
+Each report tab includes a **Review and closure checklist** for the relevant domain. Technical tabs also show per-resource **Configuration evidence and gaps** and findings linked to the same scope. The grouped inventory, RBAC assignment summary, benchmark status, and billing reconciliation offer additional breakdowns without inferring access or compliance. **Not observed** does not mean disabled, absent, or passed. Graph observations and optional AI prompts are separate from configuration findings, and the report does not apply or validate remediation.
+
+Each finding links directly to the relevant **Microsoft Learn** procedures. Each tab also includes scope-specific links with a short explanation of what to verify. **Security posture** explains how to interpret the supplied Entra settings before showing the underlying Graph rows. Reference URLs come from a fixed public Microsoft Learn catalog, not the uploaded archive or AI responses. They are exported to CSV and load only when clicked; the report opens them without sending its own URL as a referrer.
+
+**Assessment progress** shows actual stages, including local ZIP validation, optional read-only Azure collection, each AI agent's response, and report creation. Elapsed time is shown instead of an estimated percentage. If an agent fails, its stage shows the reason and the run does not fall back to an offline result.
+
+## Try the sample
+
+Choose **Download sample ZIP** or use [azure-graph-sample.zip](./samples/azure-graph-sample.zip). It includes expanded synthetic Microsoft Graph v1.0 policy responses (authorization, authentication methods, and Conditional Access), a separate inventory with two fictional subscriptions and 12 resources, and illustrative Prowler results. It exercises App Service and slots, Functions, Storage, SQL, Key Vault, AKS, RBAC, costs, disaster recovery signals, and incomplete evidence. No data was exported from Azure, Graph, or Prowler. Expect **12 resources, 12 findings, 1 High, and 14 Graph observations** with the default mapping.
+
+**Try the sample offline** processes only the bundled example and labels the report as a demo. It never uses credentials, invokes agents, or accepts an uploaded ZIP. To test the AI flow, download and upload the sample after configuring the Azure OpenAI key. The report still identifies the unchanged bundled ZIP as synthetic, and it cannot be combined with live Azure inventory. Regenerate the bundle with `python -B .\scripts\make_sample.py`.
+
+## Accepted ZIP format
+
+Only the following exact, case-sensitive filenames at the root of the ZIP are opened. Other entries are counted, but neither opened nor listed. Never rename sign-in, audit, user, or application logs to one of these names. Limits: 24 MiB per archive, 12 MiB per accepted entry, and 400 entries. Recognized configuration files must be JSON objects.
+
+| Entry | Accepted evidence |
+|---|---|
+| `authorizationPolicy.json` | Graph `/policies/authorizationPolicy`: guest invitations and selected default member permissions. |
+| `authenticationMethodsPolicy.json` | Graph `/policies/authenticationMethodsPolicy`: supported method types and configuration states, not registrations for individuals. |
+| `conditionalAccessPolicies.json` | One Graph page `{"value": [...]}` from `/identity/conditionalAccess/policies`: counts by state only. It does not determine MFA coverage. The app does not follow `nextLink`. |
+| `assessment-v1.json` | Locally normalized configuration inventory, RBAC, optional function metadata, and approved aggregates. |
+| `prowler-summary.json` | Normalized summary of a separately authorized Prowler run. Do not include an unredacted Prowler export, resource identifiers, alert entities, or descriptions. |
+| `prowler-cis-azure.json` / `prowler-nis2-azure.json` | Optional official Azure framework JSON catalogs from your approved Prowler release. The app imports requirement IDs, not descriptions. Requirements without results stay `manual_review / not_run`. |
+
+Example `assessment-v1.json` (synthetic):
+
+```json
+{
+  "schema_version": 1,
+  "resources": [
+    {
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/sample/providers/Microsoft.Web/sites/sample",
+      "type": "microsoft.web/sites",
+      "location": "westeurope",
+      "httpsOnly": false,
+      "minTlsVersion": "1.2",
+      "publicNetworkAccess": "Enabled"
+    }
+  ],
+  "rbac": []
+}
+```
+
+`subscriptions` and `groups` are optional arrays of subscription GUIDs and resource group ARM IDs. RBAC entries accept `scope`, `principalId`, `principalType`, and `roleDefinitionId`. Principal object IDs are retained without resolving them to identities. Other resource identifiers are pseudonymized. The configuration allowlist is in [evidence.py](./evidence.py). Unknown fields, unrestricted text, and personal identifiers are not reproduced.
+
+Optional `functions` entries accept `id` (a function ARM ID, including any slot), `trigger`, `authLevel` (`anonymous`, `function`, or `admin`), and `disabled` (boolean). Do not include invocation URLs, full function definitions, files, or test data. The live collector does not call the Functions listing endpoint because it can return such fields. App inventory can also include `lastDeploymentDate`, `lastDeploymentStatus`, `lastBackupDate`, `runtimeStack`, `runtimeVersion`, and `runtimeEosDate`. Dates use `YYYY-MM-DD`; verify end-of-support dates with the vendor. The report computes the 120-day support window against the snapshot date. Do not include repository URLs, names, deployment messages, or backup copies.
+
+Example `prowler-summary.json` (illustrative version and requirements):
+
+```json
+{
+  "version": "6.1.0",
+  "requirements": [
+    {
+      "benchmark": "CIS-Azure",
+      "benchmarkVersion": "6.0",
+      "section": "1",
+      "requirement": "1.2",
+      "exclusion": "entra_permissions"
+    }
+  ],
+  "checks": [
+    {
+      "benchmark": "NIS2-2024-2690",
+      "section": "2",
+      "requirement": "2.1",
+      "status": "fail",
+      "point": "b"
+    }
+  ]
+}
+```
+
+Allowed statuses: `pass`, `fail`, `manual_review`, `needs_entra_access`, and `not_applicable`. Allowed exclusions: `not_run`, `privacy`, `data_plane`, `entra_permissions`, `not_supported`, and `scope`. A catalog entry does not prove a check was run. The DPO and legal team should verify mappings from the implementing regulation to Article 21(2).
+
+## Live Azure review (optional, read-only)
+
+Install Azure CLI from an approved source. Set the assessment tenant GUID locally. Use a dedicated approved CLI profile, for example by setting `AZURE_CONFIG_DIR` to a protected profile directory. Azure CLI may keep its own token cache there; the application does not copy credentials or tokens into the snapshot. The application never invokes `az login`, changes the default subscription, installs extensions, or calls Microsoft Graph live.
+
+For the first authorized run, limit live collection to a test subscription:
+
+```powershell
+$env:ASSESSMENT_AZURE_TENANT_ID = '<assessment-tenant-GUID>'
+python -B .\app.py --output 'C:\Company\AzureReview\Snapshots' --subscription-id '<test-subscription-GUID>'
+```
+
+The pilot fails rather than falling back to another subscription if the selected subscription is not visible in the tenant. The limit applies only to live collection, not the contents of an uploaded archive. Omit `--subscription-id` to review the tenant's enabled subscriptions visible to the dedicated CLI session. Reader at the tenant root does not prove that the local session's subscription list is complete or current. The UI shows whether local settings are present; it does not test cloud access without approval.
+
+The collector projects Resource Graph metadata, reads generic ARM resource lists and RBAC assignments, and flags resources present in only one inventory. Where available, it adds cost by group and currency for the previous UTC calendar month, Defender and Azure Policy aggregates, and 30-day totals for `Requests`, `Http4xx`, and `Http5xx` for up to 100 observed sites/slots. Active alerts are counted by severity without retrieving entities and descriptions. Assignment parameters and diagnostic events are not collected. App Service detail adds dedicated ARM GETs for FTP/SCM publishing policies (booleans, not credentials), presence of diagnostic settings, and sticky setting name counts at the parent site. It does not save the names or read setting values. The `Method and limits` tab shows coverage and sanitized command templates. Resource Graph and Cost Management use POST for documented read-only queries; the collector performs no remediation.
+
+### Equivalent terminal commands
+
+Only run these after reviewing the mandate and approving the data categories:
+
+```powershell
+python -B .\build.py --zip 'C:\Company\AzureReview\config.zip' --output 'C:\Company\AzureReview\Snapshots' --confirm
+python -B .\azure_collect.py --tenant-id '<assessment-tenant-GUID>' --subscription-id '<test-subscription-GUID>' --output 'C:\Company\AzureReview\Snapshots' --confirm-read-only
+```
+
+[scripts/collect.sh](./scripts/collect.sh) offers the same live flow on Bash.
+
+## AI review setup (API key)
+
+In **Setup**, enter the Azure OpenAI resource endpoint (for example `https://<resource>.openai.azure.com`), the **deployment name** shown in the portal (for example `review-model-1.2`), and its API key. Use a company-approved deployment that supports the [Azure OpenAI Responses API](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses) and permits API key authentication. Do not use a Foundry project URL ending in `/api/projects/...`.
+
+The **Security Posture** and **Compliance** agents are included in the application and use that one deployment. There is nothing to create in the Foundry portal besides the deployment if you do not already have one. They are not hosted Foundry Agent Service agents: [that service requires Entra and does not accept API keys](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/configure-agent). You can configure a separate **Azure tenant ID** for optional live inventory, which still uses a read-only Azure CLI session.
+
+Settings entered via the UI exist only in the running local process. The API key is masked, never returned or written to disk, and cleared when the app stops. A blank key keeps the existing key only for the same endpoint. Do not send the key in chat. Saving does not validate the credentials against Azure. For a real assessment, the app calls each agent for its supported evidence after approval: Security Posture reviews Azure resource settings, and Compliance reviews supported Microsoft Graph policy settings. An agent without evidence is marked not called. Agent failures or incomplete model responses stop the assessment; there is no local fallback.
+
+Responses requests use `store: false`. Managed telemetry policies may still apply. Each request sends selected boolean or enumerated configuration fields, public control criteria, and temporary row numbers to the approved deployment. The allowlist includes a zero/nonzero HTTP usage indicator, not raw request counts. The request excludes the archive, policy and resource names, resource and principal IDs, locations, costs, text from the archive, and all reports. Approve both the deployment and this transfer before processing real evidence. If organizational policy forbids the transfer, do not approve it.
+
+Foundry decides `finding`, `no_finding`, or `insufficient` per supported evidence row and supplies severity for findings. The app validates the response format, attaches local pseudonymous evidence and fixed Microsoft Learn guidance, and applies the separate report severity uplift for systems marked as likely to process personal data. **Findings → Foundry evidence decisions** records model decisions. Imported billing, inventory, and compliance summaries remain context; missing or unsupported data is not AI-verified. There is a limit of 480 evidence rows per run; a larger scope must be split explicitly. The **Try the sample offline** demo and the standalone build/collector commands use local rules and are labelled separately.
+
+## Acceptance, retention, and limitations
+
+- **Acceptance:** Run the bundled offline demo, then approve an assessment using the sample and your configured deployment. Verify both agent statuses in `Method and limits`. For live Azure inventory, start with one test subscription and compare the inventory, RBAC, and selected App Service settings with Azure Portal. Do not treat syntax checks or mock responses as live validation.
+- **Systems:** The app suggests groupings within a subscription by stripping environment markers from group names in memory. Confirm the suggestions in `csv\resource-groups\system-map-candidates.csv` and copy approved rows to [scripts/system_map.csv](./scripts/system_map.csv). Use only `SYS-...` codes, not names. A `yes` classification raises severity by one level up to `High`. To correlate runs, keep a randomly generated 64-digit hexadecimal `ASSESSMENT_PSEUDONYM_KEY` within the assessment team, outside source and reports. Otherwise aliases change on each run.
+- **Retention:** The proposed retention period is 30 days, subject to DPO approval. For one snapshot, use `python -B .\build.py --output 'C:\Company\AzureReview\Snapshots' --delete-snapshot '<snapshot-id>' --confirm`. This is logical deletion, not media sanitization or backup deletion. Apply retention separately to the source export.
+- **Coverage:** App Service and other inventory areas show available configuration evidence only. No raw application settings, credential values, callback URLs, repository/deployer identities, or deployment logs are read. Reachability, effective RBAC, incident activity, and restore outcomes are not established. Each finding requires owner confirmation before action.
+- **Prowler:** This app imports official catalogs and normalized results; it does not launch a live scan. The [Prowler Azure authentication guide](https://docs.prowler.com/user-guide/providers/azure/authentication) lists permissions such as `AuditLog.Read.All` and `Directory.Read.All` for Entra checks. Reader does not cover the full benchmark, and the mandate excludes reading event logs. Before a separate run, approve the version, exact checks, API calls, privileges, and exclusions. Do not grant additional access just to make the report complete.
+- **Compliance and breach status:** The report is not a CIS, NIS2, GDPR, or DORA verdict. Use the organization's SOC/CSIRT process for a suspected active breach. Reviewing event logs would require a separately authorized workflow; do not disable the import safeguards.
+
+Run local verification without signing in or contacting Azure or Foundry:
+
+```powershell
+python -B -m unittest discover -s .\tests -v
+```
