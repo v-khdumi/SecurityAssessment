@@ -24,7 +24,7 @@ Each report tab includes a **Review and closure checklist** for the relevant dom
 
 Each finding links directly to the relevant **Microsoft Learn** procedures. Each tab also includes scope-specific links with a short explanation of what to verify. **Security posture** explains how to interpret the supplied Entra settings before showing the underlying Graph rows. Reference URLs come from a fixed public Microsoft Learn catalog, not the uploaded archive or AI responses. They are exported to CSV and load only when clicked; the report opens them without sending its own URL as a referrer.
 
-**Assessment progress** shows upload, ZIP validation on the assessment host, each AI agent's response, and report creation. Elapsed time is shown instead of an estimated percentage. If an agent fails, its stage shows the reason and the run does not fall back to an offline result.
+**Assessment progress** shows upload, ZIP validation, evidence preparation, each AI agent's response, and report creation. If a run stops, the error is shown in that panel. A validated ZIP is readable, but it does not necessarily contain supported settings. If the run stops before either agent starts, check for the accepted filenames and required configuration fields. The app does not fall back to an offline result.
 
 After opening the report from the app, select **Clean** next to **Toggle theme** to return to the ZIP upload and clear the matching workspace. Saved reports and Foundry setup stay in place. Select a ZIP and confirm again to start another assessment. The button is hidden in HTML reports opened as local files.
 
@@ -48,7 +48,7 @@ Keep the tunnel open and use the exact session URL printed by the application, i
 
 ## Accepted ZIP format
 
-Only the following exact, case-sensitive filenames at the root of the ZIP are opened. Other entries are counted, but neither opened nor listed. Never rename sign-in, audit, user, or application logs to one of these names. Limits: 512 MiB per archive, 4,000 entries, 32 MiB per accepted file uncompressed, and 64 MiB total accepted configuration uncompressed. Recognized configuration files must be JSON objects. Larger exports should be scoped by subscription or workload and assessed as separate, valid ZIPs; do not split the bytes of a single ZIP.
+Only the following exact, case-sensitive filenames are opened, at the root or in subfolders. Each supported filename may occur only once in an archive. Checksums (`SHA256SUMS`), error files (`ERRORS.ndjson`), and other unrecognized files are counted but neither opened nor listed. An export error can still mean that a required configuration file is missing. Never rename sign-in, audit, user, or application logs to one of these names. Limits: 512 MiB per archive, 4,000 entries, 32 MiB per accepted file uncompressed, and 64 MiB total accepted configuration uncompressed. Recognized configuration files must be JSON objects. Larger exports should be scoped by subscription or workload and assessed as separate, valid ZIPs; do not split the bytes of a single ZIP.
 
 | Entry | Accepted evidence |
 |---|---|

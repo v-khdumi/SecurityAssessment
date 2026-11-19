@@ -42,7 +42,7 @@
         <div class="upload-box">
           <label for="archive">Configuration ZIP <span id="archive-limit" class="muted"></span></label>
           <input id="archive" type="file" accept=".zip,application/zip" aria-describedby="archive-help">
-          <p class="muted" id="archive-help">Only recognized configuration files are read. Do not rename sign-in, audit, or application logs.</p>
+          <p class="muted" id="archive-help">Recognized configuration files can be in folders. Checksums and error files are ignored. Do not rename sign-in, audit, or application logs.</p>
         </div>
         <p id="foundry-status" class="source-status" aria-live="polite">Checking review agent setup...</p>
         <div class="run-bar">
@@ -63,6 +63,7 @@
         <span id="run-time" class="source-status"></span>
       </div>
       <ol id="progress-steps" class="progress-steps" aria-live="polite"></ol>
+      <p id="run-error" class="run-error" role="alert" hidden></p>
     </section>
     <section id="result" class="card" hidden aria-labelledby="report-title">
       <div class="report-header">

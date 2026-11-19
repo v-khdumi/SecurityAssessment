@@ -306,19 +306,23 @@ def read_archive(source):
             accepted = {}
             skipped = 0
             for entry in infos:
-                if entry.is_dir():
+                parts = entry.filename.replace("\\", "/").split("/")
+                name = parts[-1]
+                if not name:
                     continue
-                if entry.filename not in MEMBERS:
+                if name not in MEMBERS:
                     skipped += 1
                     continue
-                if entry.filename in accepted:
-                    raise EvidenceError("The ZIP archive contains duplicate configuration files.")
+                if "" in parts or ".." in parts or any(":" in part for part in parts) or "\x00" in entry.orig_filename:
+                    raise EvidenceError(f"The ZIP contains an unsafe path for {name}.")
+                if name in accepted:
+                    raise EvidenceError(f"The ZIP contains more than one {name}. Include only one copy, even across folders.")
                 mode = entry.external_attr >> 16
                 if entry.file_size > MAX_MEMBER:
                     raise EvidenceError(f"A configuration file exceeds {MAX_MEMBER // MIB} MiB uncompressed. Split by assessment scope.")
                 if entry.flag_bits & 1 or stat.S_ISLNK(mode) or entry.file_size > max(1, entry.compress_size) * 200:
                     raise EvidenceError("A configuration entry is encrypted or unsafe to expand.")
-                accepted[entry.filename] = entry
+                accepted[name] = entry
             if sum(entry.file_size for entry in accepted.values()) > MAX_CONFIG_BYTES:
                 raise EvidenceError(f"Configuration files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
             config = {}

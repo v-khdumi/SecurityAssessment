@@ -221,10 +221,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.progress("evidence", "running", "Reading recognized configuration files on the assessment host.")
                 prepared_archive = read_archive(upload)
             self.progress("evidence", "done", "Archive validated. The temporary upload is closed.")
+            self.progress("prepare", "running", "Checking the ZIP for supported assessment evidence.")
+            if not prepared_archive[0]:
+                raise EvidenceError(
+                    "No recognized configuration files were found in the ZIP. Include a supported file such as "
+                    "assessment-v1.json, authorizationPolicy.json, or sharepointSettings.json. "
+                    "Sign-in, audit, and application logs are not assessed."
+                )
             status = {}
 
             def assess(batches):
                 nonlocal status
+                count = sum(map(len, batches.values()))
+                if not count:
+                    raise EvidenceError(
+                        "The recognized files contain no supported configuration settings for Foundry to assess. "
+                        "Check the expected JSON fields in the Accepted ZIP format section of the README."
+                    )
+                self.progress("prepare", "done", f"Prepared {count} configuration patterns for Foundry.")
                 decisions, status, receipts = assess_evidence(connection, batches, self.progress)
                 self.progress("report", "running", "Writing the Foundry decisions to the report.")
                 return decisions, status, receipts

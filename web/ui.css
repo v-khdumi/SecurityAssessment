@@ -95,6 +95,7 @@ li { margin-block:.33rem; }
 .progress-steps li[data-state=failed] .source-status { color:var(--danger); border-color:currentColor; }
 .progress-steps p { flex:1 0 100%; color:var(--muted); margin:0; font-size:.84rem; }
 .progress-steps p:empty { display:none; }
+.run-error { margin:.75rem 0 0; padding:.65rem .75rem; border-inline-start:3px solid var(--danger); background:var(--surface); color:var(--danger); }
 .report-header { justify-content:space-between; flex-wrap:wrap; margin-bottom:.75rem; }
 .button-link { color:var(--accent); border:1px solid var(--line); border-radius:.5rem; padding:.37rem .72rem; text-decoration:none; font-weight:650; }
 .result-notice { margin:.6rem 0; padding:.52rem .7rem; border-inline-start:3px solid var(--accent); background:var(--surface); }

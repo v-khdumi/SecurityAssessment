@@ -40,10 +40,20 @@ def archive(**members):
 class EvidenceTests(unittest.TestCase):
     def test_selects_configuration_members_without_opening_logs(self):
         blob = archive(**{"assessment-v1.json": CONFIG, "auditLogs.json": "not JSON",
-                          "signIns.json": "not JSON", "../authorizationPolicy.json": "not JSON"})
+                          "signIns.json": "not JSON", "export/AuthorizationPolicy.json": "not JSON"})
         config, skipped = read_archive(blob)
         self.assertEqual(list(config), ["assessment-v1.json"])
         self.assertEqual(skipped, 3)
+
+    def test_rejects_duplicate_configuration_names_across_folders(self):
+        blob = archive(**{"authorizationPolicy.json": {}, "export/authorizationPolicy.json": {}})
+        with self.assertRaisesRegex(EvidenceError, "more than one authorizationPolicy.json"):
+            read_archive(blob)
+
+    def test_rejects_unsafe_paths_for_recognized_configuration(self):
+        for path in ("../authorizationPolicy.json", "/export/authorizationPolicy.json", r"C:\export\authorizationPolicy.json"):
+            with self.subTest(path=path), self.assertRaisesRegex(EvidenceError, "unsafe path"):
+                read_archive(archive(**{path: {}}))
 
     def test_invalid_archive_creates_no_artifacts(self):
         with tempfile.TemporaryDirectory() as output:
@@ -473,10 +483,13 @@ class LocalAppTests(unittest.TestCase):
 
     def test_foundry_assesses_microsoft_365_only_archive_without_exporting_teams_or_domain_identity(self):
         blob = archive(**{
-            "sharepointSettings.json": {"value": {"sharingCapability": "externalUserAndGuestSharing",
+            "export/m365/sharepointSettings.json": {"value": {"sharingCapability": "externalUserAndGuestSharing",
                 "isLegacyAuthProtocolsEnabled": True, "sharingAllowedDomainList": ["excluded-domain.example.test"]}},
-            "teamsConfiguration.json": {"value": [{"id": SUB, "displayName": "Excluded Team Name",
+            r"export\m365\teamsConfiguration.json": {"value": [{"id": SUB, "displayName": "Excluded Team Name",
                 "guestSettings": {"allowDeleteChannels": True}}, {"id": "00000000-0000-0000-0000-000000000022"}]},
+            "SHA256SUMS": "not JSON",
+            "export/ERRORS.ndjson": "not JSON",
+            "SHA256SUMSERRORS.ndjson": "not JSON",
         })
         self.server.setup = ConnectionSetup(foundry=MODEL)
         headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
@@ -500,6 +513,7 @@ class LocalAppTests(unittest.TestCase):
         self.assertEqual(code, 200, body)
         result = json.loads(body)
         self.assertEqual((result["resources"], result["m365_observations"], result["findings"]), (0, 3, 3))
+        self.assertEqual((result["eligible_files"], result["skipped"]), (2, 3))
         report = (self.server.output / result["snapshot"] / "report.html").read_text(encoding="utf-8")
         self.assertIn("Microsoft 365 decisions from Foundry", report)
         self.assertIn("The total also includes Microsoft 365 findings.", report)
@@ -597,9 +611,10 @@ class LocalAppTests(unittest.TestCase):
                 client.request("POST", self.prefix + "assess", archive(**REPORT_FIXTURE), headers)
                 response = client.getresponse()
                 self.assertTrue(response.getheader("Content-Type").startswith("application/x-ndjson"))
-                events = [json.loads(response.readline()) for _ in range(5)]
+                events = [json.loads(response.readline()) for _ in range(7)]
                 self.assertEqual([(event["stage"], event["state"]) for event in events],
                                  [("upload", "done"), ("evidence", "running"), ("evidence", "done"),
+                                  ("prepare", "running"), ("prepare", "done"),
                                   ("posture", "running"), ("compliance", "running")])
                 allow_response.set()
                 remaining = [json.loads(line) for line in response.read().splitlines()]
@@ -609,6 +624,28 @@ class LocalAppTests(unittest.TestCase):
             finally:
                 allow_response.set()
                 client.close()
+
+    def test_valid_zip_without_supported_settings_stops_at_preparation(self):
+        self.server.setup = ConnectionSetup(foundry=MODEL)
+        headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
+                   "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0", "Accept": "application/x-ndjson"}
+        cases = (
+            (archive(**{"export/resources.json": CONFIG}), "No recognized configuration files"),
+            (archive(**{"assessment-v1.json": {"schema_version": 1, "resources": []}}),
+             "no supported configuration settings"),
+        )
+        for blob, expected in cases:
+            with self.subTest(expected=expected), patch("app.assess_evidence") as assess:
+                status, body = self.request("POST", self.prefix + "assess", blob, headers)
+                self.assertEqual(status, 200)  # Stream opened before the evidence error.
+                events = [json.loads(line) for line in body.splitlines()]
+                self.assertEqual([(event["stage"], event["state"]) for event in events[:-1]],
+                                 [("upload", "done"), ("evidence", "running"), ("evidence", "done"),
+                                  ("prepare", "running")])
+                self.assertEqual(events[-1]["status"], 422)
+                self.assertIn(expected, events[-1]["payload"]["error"])
+                assess.assert_not_called()
+        self.assertEqual(list(self.server.output.iterdir()), [])
 
     def test_real_assessment_requires_key_and_agent_success(self):
         route = self.prefix + "assess"

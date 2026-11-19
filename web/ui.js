@@ -183,9 +183,10 @@ function cleanWorkspace() {
   element("progress").hidden = true;
   for (const id of ["open-report", "open-findings", "download"]) element(id).removeAttribute("href");
   for (const id of ["progress-steps", "run-time", "priorities", "metric-high", "metric-findings",
-    "metric-resources", "metric-graph", "result-coverage", "result-sources", "result-ai"]) {
+    "metric-resources", "metric-graph", "result-coverage", "result-sources", "result-ai", "run-error"]) {
     element(id).textContent = "";
   }
+  element("run-error").hidden = true;
   element("status").textContent = "Workspace cleared. Saved reports and Foundry setup were kept. Select a ZIP to start again.";
   element("archive").focus();
 }
@@ -202,7 +203,11 @@ if ("BroadcastChannel" in window) {
 
 function startProgress() {
   const steps = [["upload", "Receive ZIP on the assessment host"], ["evidence", "Read configuration evidence"],
+    ["prepare", "Prepare evidence for Foundry"],
     ["posture", "AI · Security Posture"], ["compliance", "AI · Compliance"], ["report", "Build the report on the assessment host"]];
+  const error = element("run-error");
+  error.textContent = "";
+  error.hidden = true;
   const entries = new Map(steps.map(([id, label]) => {
     const item = document.createElement("li");
     const title = document.createElement("strong");
@@ -235,6 +240,8 @@ function startProgress() {
       clearInterval(timer);
       tick();
       if (!ok) {
+        error.hidden = false;
+        error.textContent = `Assessment stopped: ${message}`;
         const active = steps.find(([id]) => entries.get(id).item.dataset.state === "running");
         if (active) update(active[0], "failed", message);
         for (const [id] of steps) {
