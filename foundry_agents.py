@@ -18,7 +18,7 @@ API_KEY = re.compile(r"[A-Za-z0-9_.~+/=-]{16,512}")
 AGENTS = {
     "posture": ("Security Posture", "Assess Azure resource configuration.",
                 ("EXCEPTION", "COMPENSATING", "CHANGE")),
-    "compliance": ("Compliance", "Assess Entra policy configuration without concluding that a tenant is compliant.",
+    "compliance": ("Compliance", "Assess Entra and Microsoft 365 configuration without concluding that a tenant is compliant.",
                    ("EVIDENCE", "SCOPE", "DPO")),
 }
 MAX_EVIDENCE_ROWS = 480

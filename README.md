@@ -26,6 +26,8 @@ Each finding links directly to the relevant **Microsoft Learn** procedures. Each
 
 **Assessment progress** shows upload, ZIP validation on the assessment host, each AI agent's response, and report creation. Elapsed time is shown instead of an estimated percentage. If an agent fails, its stage shows the reason and the run does not fall back to an offline result.
 
+After opening the report from the app, select **Clean** next to **Toggle theme** to return to the ZIP upload and clear the matching workspace. Saved reports and Foundry setup stay in place. Select a ZIP and confirm again to start another assessment. The button is hidden in HTML reports opened as local files.
+
 ## Run on a managed assessment host
 
 Use this deployment when the workstation must not process the contents of the archive. Run the application on a company-managed host approved to receive the ZIP and store reports, not on the workstation. The workstation browser uploads the archive and displays the report. The host decompresses and validates the ZIP, prepares the allowlisted indicators, and writes the report. The approved Foundry deployment makes the assessment decisions. Do not send unfiltered archive contents directly to Foundry.
@@ -53,9 +55,13 @@ Only the following exact, case-sensitive filenames at the root of the ZIP are op
 | `authorizationPolicy.json` | Graph `/policies/authorizationPolicy`: guest invitations and selected default member permissions. |
 | `authenticationMethodsPolicy.json` | Graph `/policies/authenticationMethodsPolicy`: supported method types and configuration states, not registrations for individuals. |
 | `conditionalAccessPolicies.json` | One Graph page `{"value": [...]}` from `/identity/conditionalAccess/policies`: counts by state only. It does not determine MFA coverage. The app does not follow `nextLink`. |
+| `sharepointSettings.json` | [Graph `/admin/sharepoint/settings`](https://learn.microsoft.com/en-us/graph/api/sharepointsettings-get?view=graph-rest-1.0): selected SharePoint and OneDrive tenant settings. Accepts the settings object directly or inside `{"value": {...}}`. |
+| `teamsConfiguration.json` | A [Graph `GET /teams/{team-id}`](https://learn.microsoft.com/en-us/graph/api/team-get?view=graph-rest-1.0) response containing `id` and `guestSettings`, or `{"value": [...]}` wrapping those individual responses. The bulk `/teams` list by itself does not supply these settings. |
 | `assessment-v1.json` | Locally normalized configuration inventory, RBAC, optional function metadata, and approved aggregates. |
 | `prowler-summary.json` | Normalized summary of a separately authorized Prowler run. Do not include an unredacted Prowler export, resource identifiers, alert entities, or descriptions. |
 | `prowler-cis-azure.json` / `prowler-nis2-azure.json` | Optional official Azure framework JSON catalogs from your approved Prowler release. The app imports requirement IDs, not descriptions. Requirements without results stay `manual_review / not_run`. |
+
+Microsoft 365 exports can be uploaded without Azure inventory. The **Microsoft 365** tab shows observed settings and Foundry decisions. Teams' original IDs and names, SharePoint sharing domain lists, emails, chat messages, files, and audit events are not sent to Foundry or included in the report. An absent setting is not a pass. Other Microsoft 365 workloads, such as Exchange Online, are not assessed by these adapters. The app does not call Microsoft Graph directly.
 
 Example `assessment-v1.json` (synthetic):
 
@@ -133,7 +139,7 @@ In **Setup**, enter the Azure OpenAI resource endpoint (for example `https://<re
 
 The **Security Posture** and **Compliance** agents are included in the application and use that one deployment. There is nothing to create in the Foundry portal besides the deployment if you do not already have one. They are not hosted Foundry Agent Service agents: [that service requires Entra and does not accept API keys](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/configure-agent).
 
-Settings entered via the UI exist only in the running local process. The API key is masked, never returned or written to disk, and cleared when the app stops. A blank key keeps the existing key only for the same endpoint. Do not send the key in chat. Saving does not validate the credentials against Azure. For a real assessment, the app calls each agent for its supported evidence after approval: Security Posture reviews Azure resource settings, and Compliance reviews supported Microsoft Graph policy settings. An agent without evidence is marked not called. Agent failures or incomplete model responses stop the assessment; there is no local fallback.
+Settings entered via the UI exist only in the running local process. The API key is masked, never returned or written to disk, and cleared when the app stops. A blank key keeps the existing key only for the same endpoint. Do not send the key in chat. Saving does not validate the credentials against Azure. For a real assessment, the app calls each agent for its supported evidence after approval: Security Posture reviews Azure resource settings, and Compliance reviews supported Entra and Microsoft 365 configuration from Graph. An agent without evidence is marked not called. Agent failures or incomplete model responses stop the assessment; there is no local fallback.
 
 Responses requests use `store: false`. Managed telemetry policies may still apply. Each request sends selected boolean or enumerated configuration fields, public control criteria, and temporary row numbers to the approved deployment. The allowlist includes a zero/nonzero HTTP usage indicator, not raw request counts. The request excludes the archive, policy and resource names, resource and principal IDs, locations, costs, text from the archive, and all reports. Approve both the deployment and this transfer before processing real evidence. If organizational policy forbids the transfer, do not approve it.
 

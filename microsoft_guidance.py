@@ -2,6 +2,10 @@
 
 BASE = "https://learn.microsoft.com/en-us/"
 ARTICLES = {
+    "m365-sharepoint": ("SharePoint and OneDrive tenant settings", "graph/api/sharepointsettings-get?view=graph-rest-1.0",
+                        "Interpret the tenant settings separately from individual site permissions and file sharing."),
+    "m365-teams": ("Teams guest channel settings", "graph/api/resources/teamguestsettings?view=graph-rest-1.0",
+                   "Check what each team permits guests to do without assuming tenant-wide guest access."),
     "app-config": ("Configure an App Service app", "azure/app-service/configure-common",
                    "Check HTTPS-only, remote debugging, and site configuration on the affected app or slot."),
     "app-tls": ("TLS settings in Azure App Service", "azure/app-service/overview-tls",
@@ -82,6 +86,11 @@ ARTICLES = {
 LINK_TITLES = {BASE + path: title for title, path, _ in ARTICLES.values()}
 
 FINDING_REFERENCES = {
+    "M365-SPO-ANYONE": ("m365-sharepoint",),
+    "M365-SPO-LEGACY": ("m365-sharepoint", "auth-methods"),
+    "M365-SPO-RESHARE": ("m365-sharepoint",),
+    "M365-TEAMS-GUEST-EDIT": ("m365-teams",),
+    "M365-TEAMS-GUEST-DELETE": ("m365-teams",),
     "APP-HTTPS": ("app-config", "app-tls"),
     "APP-TLS": ("app-tls",),
     "APP-SCM-TLS": ("app-tls", "app-ingress"),
@@ -106,6 +115,7 @@ FINDING_REFERENCES = {
     "ENTRA-VOICE-SMS": ("auth-methods", "auth-strength"),
 }
 SECTION_REFERENCES = {
+    "Microsoft 365": ("m365-sharepoint", "m365-teams"),
     "Summary": ("waf", "threat-monitoring"),
     "Systems": ("arm", "waf"),
     "Resilience & DR": ("recovery", "sql-restore"),

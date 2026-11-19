@@ -93,6 +93,28 @@ GRAPH_RULES = (
          "Method availability does not show registration, use, or whether stronger methods are required.",
          "Verify authentication strength for privileged or sensitive access before changing method availability.", "j", ("32",)),
 )
+M365_RULES = (
+    Rule("M365-SPO-ANYONE", "SharePoint and OneDrive tenant policy permits Anyone links",
+         ("microsoft.graph/sharepoint",), "sharingCapability", "externalUserAndGuestSharing", "Medium",
+         "The tenant policy allows links that do not require sign-in; it does not establish that a site or file is shared.",
+         "Verify tenant and site sharing limits and confirm approved anonymous sharing exceptions.", "ei", ("25", "32")),
+    Rule("M365-SPO-LEGACY", "SharePoint legacy authentication protocols enabled",
+         ("microsoft.graph/sharepoint",), "isLegacyAuthProtocolsEnabled", True, "Medium",
+         "The tenant setting permits older authentication protocols; it does not show client usage or effective Conditional Access.",
+         "Confirm legacy client dependencies and plan a transition to modern authentication.", "ij", ("32",)),
+    Rule("M365-SPO-RESHARE", "SharePoint permits external guest resharing",
+         ("microsoft.graph/sharepoint",), "isResharingByExternalUsersEnabled", True, "Low",
+         "A guest may reshare items under the tenant policy when other sharing controls permit it.",
+         "Verify external collaboration requirements and site-level restrictions before changing the setting.", "di", ("25", "32")),
+    Rule("M365-TEAMS-GUEST-EDIT", "Teams guests can create or update channels",
+         ("microsoft.graph/team",), "guestSettings.allowCreateUpdateChannels", True, "Low",
+         "The team setting permits guest channel changes; it does not establish that guests are present or allowed at tenant level.",
+         "Confirm channel governance requirements with the team owner.", "i", ("32",)),
+    Rule("M365-TEAMS-GUEST-DELETE", "Teams guests can delete channels",
+         ("microsoft.graph/team",), "guestSettings.allowDeleteChannels", True, "Medium",
+         "The team setting permits guest channel deletion if guests have effective access.",
+         "Review guest access and channel recovery with the team owner before changing permissions.", "ci", ("32",)),
+)
 
 
 @dataclass(frozen=True)
@@ -277,6 +299,36 @@ GUIDANCE = {
         "Verify registration coverage and the authentication strengths required by actual Conditional Access policies.",
         "Pilot stronger methods with approved groups before removing a method on which recovery or access depends.",
         "Confirm policy enforcement and the approved recovery path with synthetic test identities.",
+    ),
+    "M365-SPO-ANYONE": FindingGuidance(
+        "SharePoint and data owners", "The tenant setting does not prove that any item is publicly shared.",
+        "Check approved anonymous sharing use cases and affected site policy through authorized configuration exports.",
+        "Pilot narrower sharing defaults and validate that legitimate partners still have access.",
+        "Verify tenant and site policy and document any approved public-sharing exception.",
+    ),
+    "M365-SPO-LEGACY": FindingGuidance(
+        "SharePoint and identity owners", "Allowed protocols are not evidence of sign-in activity.",
+        "Identify approved workflows that rely on legacy protocols without importing sign-in logs.",
+        "Migrate dependent workflows to modern authentication before restricting the older methods.",
+        "Confirm the new policy and validate approved integration workflows.",
+    ),
+    "M365-SPO-RESHARE": FindingGuidance(
+        "SharePoint and external collaboration owners", "Site policy and the tenant sharing mode may restrict effective resharing.",
+        "Confirm how guests are expected to collaborate and where resharing exceptions are needed.",
+        "Pilot narrower guest permissions before expanding restrictions.",
+        "Confirm owner-approved guest collaboration still works under the new policy.",
+    ),
+    "M365-TEAMS-GUEST-EDIT": FindingGuidance(
+        "Teams service and team owners", "No channel content, guest membership, or tenant-wide guest access was assessed.",
+        "Check whether the team requires guests to create or rename channels.",
+        "Narrow guest channel settings only after confirming owner and guest workflows.",
+        "Review the updated team setting and confirm approved channel management behavior.",
+    ),
+    "M365-TEAMS-GUEST-DELETE": FindingGuidance(
+        "Teams service and team owners", "The setting does not prove past deletion or that guests are present.",
+        "Verify team-level and tenant-level guest access, and confirm the channel recovery process.",
+        "Limit deletion to approved roles unless a documented business exception applies.",
+        "Confirm the setting and record the recovery and exception decisions with the owner.",
     ),
 }
 

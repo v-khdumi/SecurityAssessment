@@ -20,6 +20,10 @@ MEMBERS = {
     "assessment-v1.json", "authorizationPolicy.json", "authenticationMethodsPolicy.json",
     "conditionalAccessPolicies.json", "prowler-summary.json",
     "prowler-cis-azure.json", "prowler-nis2-azure.json",
+    "sharepointSettings.json", "teamsConfiguration.json",
+}
+SHAREPOINT_SHARING_CAPABILITIES = {
+    "disabled", "externalUserSharingOnly", "externalUserAndGuestSharing", "existingExternalUserSharingOnly",
 }
 PROWLER_CATALOGS = {"prowler-cis-azure.json": "CIS", "prowler-nis2-azure.json": "NIS2"}
 GUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.I)
@@ -367,6 +371,45 @@ def graph_config(config):
             scope = "Supplied page (the export indicates more pages)" if "@odata.nextLink" in body else "Supplied page"
             result += [(name, f"{status} · {scope}", count) for status, count in counts.items()]
     return result, sorted(omitted)
+
+
+def m365_config(config, key):
+    scopes = []
+    if "sharepointSettings.json" in config:
+        body = config["sharepointSettings.json"]
+        settings = as_dict(body["value"]) if "value" in body else body
+        props = {field: settings[field] for field in ("isLegacyAuthProtocolsEnabled",
+                 "isResharingByExternalUsersEnabled", "isRequireAcceptingUserToMatchInvitedUserEnabled",
+                 "isUnmanagedSyncAppForTenantRestricted") if type(settings.get(field)) is bool}
+        sharing = checked(settings.get("sharingCapability"), SHAREPOINT_SHARING_CAPABILITIES)
+        if sharing is not None:
+            props["sharingCapability"] = sharing
+        signout = as_dict(settings.get("idleSessionSignOut")).get("isEnabled")
+        if type(signout) is bool:
+            props["idleSessionSignOutEnabled"] = signout
+        if props:
+            scopes.append({"id": "SharePoint and OneDrive tenant settings", "type": "microsoft.graph/sharepoint",
+                           "group": None, "properties": props, "source": "ZIP — sharepointSettings.json",
+                           "evidence_sources": {}})
+    if "teamsConfiguration.json" in config:
+        body = config["teamsConfiguration.json"]
+        items = rows(body["value"]) if "value" in body else [body]
+        seen = set()
+        for team in items:
+            guests = as_dict(team.get("guestSettings"))
+            props = {f"guestSettings.{field}": guests[field]
+                     for field in ("allowCreateUpdateChannels", "allowDeleteChannels") if type(guests.get(field)) is bool}
+            if not props:
+                continue
+            if not is_guid(team.get("id")):
+                raise EvidenceError("Teams configuration requires the Graph team ID for each supplied team.")
+            reference = alias(key, "team", team["id"])
+            if reference in seen:
+                raise EvidenceError("Teams configuration contains a duplicate team.")
+            seen.add(reference)
+            scopes.append({"id": reference, "type": "microsoft.graph/team", "group": None, "properties": props,
+                           "source": "ZIP — teamsConfiguration.json", "evidence_sources": {}})
+    return scopes
 
 
 def prowler_config(document, catalogs=None):

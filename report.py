@@ -26,7 +26,8 @@ label.menu{margin-left:auto;display:flex;align-items:center;gap:.5rem;font-size:
 button,input,select{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:.38rem .63rem;min-width:0}
 button,select{cursor:pointer}
 :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.theme{float:right;margin-left:.5rem;background:#243954;color:#fff;border-color:#637592}
+.report-actions{float:right;display:flex;gap:.45rem;margin-left:.5rem}
+.report-actions button{background:#243954;color:#fff;border-color:#637592}
 main{padding-block:1.2rem 2rem} h2{margin:0 0 .75rem;letter-spacing:-.025em} h3{margin:0}
 .section-nav-label{white-space:nowrap}
 article{background:var(--card);border:1px solid var(--line);border-radius:.8rem;padding:.95rem 1rem;margin:0 0 .9rem}
@@ -76,7 +77,7 @@ code{font: .92em ui-monospace,Consolas,monospace;overflow-wrap:anywhere}
 .priority span{margin-right:.45rem}
 .priority p{margin:.28rem 0 0;color:var(--muted)}
 [hidden]{display:none!important}
-@media(max-width:640px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.navigation .jump{display:none}label.menu{margin-left:0;width:100%}label.menu select{flex:1}.theme{font-size:.8rem}article{padding:.8rem}}
+@media(max-width:640px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.navigation .jump{display:none}label.menu{margin-left:0;width:100%}label.menu select{flex:1}.report-actions button{font-size:.8rem}article{padding:.8rem}}
 """
 SCRIPT = """
 const pageSections = Array.from(document.querySelectorAll('main > section'));
@@ -122,9 +123,21 @@ document.querySelector('.theme').addEventListener('click', () => {
     (!root.dataset.theme && matchMedia('(prefers-color-scheme:dark)').matches);
   root.dataset.theme = dark ? 'light' : 'dark';
 });
+const clean = document.querySelector('.clean');
+if (location.hostname === '127.0.0.1' && /^\\/[^/]+\\/report\\/[^/]+$/.test(location.pathname)) {
+  clean.hidden = false;
+  clean.addEventListener('click', () => {
+    if ('BroadcastChannel' in window) {
+      const workspace = new BroadcastChannel('assessment-workspace');
+      workspace.postMessage(location.pathname);
+      workspace.close();
+    }
+    location.assign('../#assessment');
+  });
+}
 """
 
-PRIMARY = {"Summary", "Findings", "Systems", "Security posture", "Resources", "Method and limits"}
+PRIMARY = {"Summary", "Findings", "Systems", "Security posture", "Resources", "Method and limits", "Microsoft 365"}
 
 
 def hash_source(script):
@@ -141,7 +154,7 @@ def cell(value):
     if type(value) is bool:
         return "Yes" if value else "No"
     text = esc(value)
-    if isinstance(value, (int, float)) or str(value).startswith(("res-", "rg-", "sub-", "fn-", "SYS-")) or (
+    if isinstance(value, (int, float)) or str(value).startswith(("res-", "rg-", "sub-", "fn-", "SYS-", "team-")) or (
         len(str(value)) == 36 and str(value).count("-") == 4
     ):
         return f"<code>{text}</code>"
@@ -211,7 +224,7 @@ def render(tables, timestamp, summary):
 <div class="metric"><b>{summary["high"]}</b>High-priority findings</div>
 <div class="metric"><b>{summary["findings"]}</b>Total findings</div>
 <div class="metric"><b>{summary["resources"]}</b>Resources observed</div>
-<div class="metric"><b>{summary["graph_observations"]}</b>Graph observations</div></div>
+<div class="metric"><b>{summary["graph_observations"] + summary["m365_observations"]}</b>Graph observations</div></div>
 <p class="notice"><code>{summary["controls_with_evidence"]}</code> of <code>{summary["available_controls"]}</code> resource controls had configuration evidence. This is coverage, not a pass rate. Graph observations are policy settings, not resource findings.</p>
 <article><h3>What to review first</h3>
 {('<ul class="priority">' + priorities + '</ul><a href="#findings">See all findings</a>') if priorities else
@@ -260,7 +273,10 @@ def render(tables, timestamp, summary):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="{csp}">
 <title>Azure Tenant Inventory</title><style>{STYLE}</style></head>
-<body><header><div class="shell"><button type="button" class="theme">Toggle theme</button>
+<body><header><div class="shell"><div class="report-actions">
+<button type="button" class="theme">Toggle theme</button>
+<button type="button" class="clean" title="Clear the assessment workspace without deleting this report" hidden>Clean</button>
+</div>
 <p class="eyebrow">Confidential - internal</p><h1>Azure Tenant Inventory</h1>
 <p>Assessment engine: <strong>{esc(summary["analysis_mode"])}</strong></p>
 <p>Configuration evidence only. Not a breach investigation or a compliance verdict.</p>

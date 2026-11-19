@@ -125,7 +125,7 @@ element("review").addEventListener("click", () => {
   }
   const categories = [];
   categories.push("Only your uploaded ZIP is used. It is streamed to a temporary file in the approved folder on the assessment host and closed after parsing. Only recognized configuration files are opened.");
-  categories.push("Foundry receives only allowlisted Azure and Entra setting values and temporary row numbers. It determines the findings. No ZIP, resource or principal IDs, names, logs, costs, or raw metrics are sent. Calls can incur costs and produce telemetry.");
+  categories.push("Foundry receives only allowlisted Azure, Entra, and Microsoft 365 setting values and temporary row numbers. It determines the findings. No ZIP, resource, team or principal IDs, names, logs, costs, or raw metrics are sent. Calls can incur costs and produce telemetry.");
   confirmRun({archive, revision}, categories);
 });
 
@@ -149,7 +149,7 @@ function showResult(reply) {
   element("metric-high").textContent = reply.high;
   element("metric-findings").textContent = reply.findings;
   element("metric-resources").textContent = reply.resources;
-  element("metric-graph").textContent = reply.graph_observations;
+  element("metric-graph").textContent = reply.graph_observations + (reply.m365_observations ?? 0);
   element("priorities").replaceChildren(...reply.priority.map(item => {
     const row = document.createElement("li");
     const tier = document.createElement("span");
@@ -172,6 +172,32 @@ function showResult(reply) {
   element("result").hidden = false;
   element("report-title").focus({preventScroll: true});
   element("result").scrollIntoView();
+}
+
+function cleanWorkspace() {
+  choice = undefined;
+  element("archive").value = "";
+  element("confirmed").checked = false;
+  element("start").disabled = true;
+  element("result").hidden = true;
+  element("progress").hidden = true;
+  for (const id of ["open-report", "open-findings", "download"]) element(id).removeAttribute("href");
+  for (const id of ["progress-steps", "run-time", "priorities", "metric-high", "metric-findings",
+    "metric-resources", "metric-graph", "result-coverage", "result-sources", "result-ai"]) {
+    element(id).textContent = "";
+  }
+  element("status").textContent = "Workspace cleared. Saved reports and Foundry setup were kept. Select a ZIP to start again.";
+  element("archive").focus();
+}
+
+if ("BroadcastChannel" in window) {
+  const workspace = new BroadcastChannel("assessment-workspace");
+  workspace.addEventListener("message", event => {
+    const report = element("open-report");
+    if (!element("result").hidden && report.hasAttribute("href") && new URL(report.href).pathname === event.data) {
+      cleanWorkspace();
+    }
+  });
 }
 
 function startProgress() {

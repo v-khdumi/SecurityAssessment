@@ -471,6 +471,42 @@ class LocalAppTests(unittest.TestCase):
         self.assertEqual((summary["model_patterns"], summary["model_evidence_rows"], summary["findings"]), (1, 600, 600))
         self.assertIn("affecting 600 of 600", summary["executive"][0][1])
 
+    def test_foundry_assesses_microsoft_365_only_archive_without_exporting_teams_or_domain_identity(self):
+        blob = archive(**{
+            "sharepointSettings.json": {"value": {"sharingCapability": "externalUserAndGuestSharing",
+                "isLegacyAuthProtocolsEnabled": True, "sharingAllowedDomainList": ["excluded-domain.example.test"]}},
+            "teamsConfiguration.json": {"value": [{"id": SUB, "displayName": "Excluded Team Name",
+                "guestSettings": {"allowDeleteChannels": True}}, {"id": "00000000-0000-0000-0000-000000000022"}]},
+        })
+        self.server.setup = ConnectionSetup(foundry=MODEL)
+        headers = {**self.headers, "X-Assessment-Consent": "configuration-only",
+                   "X-Foundry-Consent": "minimized-configuration", "X-Setup-Revision": "0"}
+
+        def fake_open(request, **_):
+            payload = json.loads(request.data)
+            self.assertIn("Agent: Compliance", payload["instructions"])
+            encoded = payload["input"][0]["content"]
+            for value in (SUB, "Excluded Team Name", "excluded-domain.example.test"):
+                self.assertNotIn(value, encoded)
+            rows = json.loads(encoded)
+            self.assertEqual({row["control"]: row["observed"] for row in rows},
+                {"M365-SPO-ANYONE": "externalUserAndGuestSharing", "M365-SPO-LEGACY": True, "M365-TEAMS-GUEST-DELETE": True})
+            return FoundryProtocolTests.response([[row["id"], "finding", "Medium", "EVIDENCE"] for row in rows])
+
+        with patch("foundry_agents.build_opener") as opener:
+            opener.return_value.open.side_effect = fake_open
+            code, body = self.request("POST", self.prefix + "assess", blob, headers)
+            opener.return_value.open.assert_called_once()
+        self.assertEqual(code, 200, body)
+        result = json.loads(body)
+        self.assertEqual((result["resources"], result["m365_observations"], result["findings"]), (0, 3, 3))
+        report = (self.server.output / result["snapshot"] / "report.html").read_text(encoding="utf-8")
+        self.assertIn("Microsoft 365 decisions from Foundry", report)
+        self.assertIn("The total also includes Microsoft 365 findings.", report)
+        self.assertNotIn(SUB, report)
+        self.assertNotIn("Excluded Team Name", report)
+        self.assertNotIn("excluded-domain.example.test", report)
+
     def test_uploaded_system_has_matching_resource_and_finding_counts(self):
         tables, _, _ = build.dataset(archive(**REPORT_FIXTURE), None, {}, {},
                                      datetime(2026, 11, 19, tzinfo=timezone.utc), b"x" * 32, {})

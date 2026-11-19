@@ -14,8 +14,8 @@ import shutil
 import stat
 import sys
 
-from controls import GRAPH_RULES, GUIDANCE, NIS2, QUESTIONS, RULES, WEB, findings
-from evidence import (PROWLER_CATALOGS, TYPES, EvidenceError, graph_config,
+from controls import GRAPH_RULES, GUIDANCE, M365_RULES, NIS2, QUESTIONS, RULES, WEB, findings
+from evidence import (PROWLER_CATALOGS, SHAREPOINT_SHARING_CAPABILITIES, TYPES, EvidenceError, graph_config, m365_config,
                       project_costs, project_functions, project_inventory, project_posture, prowler_config, read_archive)
 from microsoft_guidance import FINDING_REFERENCES, SECTION_REFERENCES, entra_review, reference_rows, url
 from report import render
@@ -36,12 +36,16 @@ REVIEW_FIELDS = {
     "secureTransferRequired": bool, "enablePurgeProtection": bool, "publicTriggerEnabled": bool,
     "diagnosticsConfigured": bool, "outsideEEARegion": bool, "reportOnlyPresent": bool,
     "guestInvitationPolicy": INVITATION_POLICIES, "defaultAppRegistration": bool, "smsOrVoiceEnabled": bool,
+    "sharingCapability": SHAREPOINT_SHARING_CAPABILITIES, "isLegacyAuthProtocolsEnabled": bool,
+    "isResharingByExternalUsersEnabled": bool, "guestSettings.allowCreateUpdateChannels": bool,
+    "guestSettings.allowDeleteChannels": bool,
 }
 
 AREAS = (
     "Summary", "Systems", "Resilience & DR", "Findings", "Resources", "Resource groups",
     "Access (RBAC)", "Security posture", "Network", "Databases", "Storage", "Apps", "Containers",
     "Integration", "Servers", "Secrets & identities", "Monitoring & logging", "Cost", "Method and limits",
+    "Microsoft 365",
 )
 
 
@@ -111,11 +115,12 @@ def graph_evidence(graph):
             "properties": settings, "source": "ZIP — Microsoft Graph", "evidence_sources": {}}
 
 
-def model_evidence(resources, graph):
+def model_evidence(resources, graph, m365):
     ledger = {}
     patterns = {}
     batches = {"posture": [], "compliance": []}
-    scopes = (("posture", RULES, resources), ("compliance", GRAPH_RULES, [graph_evidence(graph)]))
+    scopes = (("posture", RULES, resources), ("compliance", GRAPH_RULES, [graph_evidence(graph)]),
+              ("compliance", M365_RULES, m365))
     for role, rules, scope in scopes:
         for resource in scope:
             for rule in rules:
@@ -191,6 +196,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         sources.append((live, True))
     resources, groups, subs, rbac, overlap, omitted, suggestions = project_inventory(sources, key)
     graph, graph_omitted = graph_config(config)
+    m365 = m365_config(config, key)
+    m365_ids = {scope["id"] for scope in m365}
     version, checks = prowler_config(config.get("prowler-summary.json"),
                                      {name: config[name] for name in PROWLER_CATALOGS if name in config})
     system_assignments = {group: (system, None) for group, system in suggestions.items()} | assignments
@@ -217,7 +224,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     if model_selected:
         if assess is None:
             raise EvidenceError("A Foundry assessment requires model decisions; no local fallback is permitted.")
-        batches, ledger = model_evidence(resources, graph)
+        batches, ledger = model_evidence(resources, graph, m365)
         decisions, review_status, foundry_receipts = assess(batches)
         if decisions.keys() != ledger.keys():
             raise EvidenceError("Foundry did not return results covering the submitted evidence.")
@@ -232,7 +239,10 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                 if verdict != "finding":
                     continue
                 group = resource["group"]
-                unassigned = "Entra policy (not a resource group)" if role == "compliance" else group or "Unassigned"
+                if resource["id"] in m365_ids:
+                    unassigned = "Microsoft 365 policy (not a resource group)"
+                else:
+                    unassigned = "Entra policy (not a resource group)" if role == "compliance" else group or "Unassigned"
                 system, likely = effective_assignments.get(group, (unassigned, None))
                 raised = likely is True and severity != "High"
                 level = {"Low": "Medium", "Medium": "High"}[severity] if raised else severity
@@ -262,10 +272,11 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                 eligible[rule.key] += 1
                 if rule.field in resource["properties"]:
                     observed[rule.key] += 1
-    has_evidence = bool(resources or rbac or graph or costs or posture or functions
+    has_evidence = bool(resources or rbac or graph or m365 or costs or posture or functions
                         or any(row[4] in {"pass", "fail"} for row in checks))
     summary = {"resources": len(resources), "findings": len(active), "high": counts["High"],
                "skipped": skipped, "eligible_files": len(config), "graph_observations": len(graph),
+               "m365_observations": sum(len(scope["properties"]) for scope in m365),
                "controls_with_evidence": len(observed), "available_controls": len(RULES),
                "priority": priority,
                "has_evidence": has_evidence, "live_azure": live is not None,
@@ -281,13 +292,14 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         ("Subscriptions observed", len(subs)), ("Resource groups observed", len(groups)),
         ("Recognized configuration files", len(config)), ("Skipped entries (not opened)", skipped),
         ("Graph configuration observations", len(graph)),
+        ("Microsoft 365 configuration observations", summary["m365_observations"]),
         ("Resource controls with evidence", len(observed)),
     ]
     if not has_evidence:
         attention.append(("Coverage", "No usable configuration evidence. Do not interpret zero findings as a favorable result."))
     add("Summary", "overview", "What needs attention", ("Indicator", "Value"), attention)
     if model_selected:
-        scope_count = len({resource["id"] for _, resource, _, _, _ in active if resource["type"] != "microsoft.graph"})
+        scope_count = len({resource["id"] for _, resource, _, _, _ in active if not resource["type"].startswith("microsoft.graph")})
         no_finding = sum(row[-2] == "no_finding" for row in model_rows)
         missing = sum(eligible.values()) - sum(observed.values())
         if active:
@@ -296,6 +308,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                         f"{counts['Low']} low) affecting {scope_count} of {len(resources)} inventoried Azure resources.")
             if any(resource["type"] == "microsoft.graph" for _, resource, _, _, _ in active):
                 headline += " The total also includes Entra policy findings."
+            if any(resource["id"] in m365_ids for _, resource, _, _, _ in active):
+                headline += " The total also includes Microsoft 365 findings."
             lead = summary["priority"][0]
             next_step = f"Start with {lead['key']} ({lead['severity']}; {lead['affected']} affected scope entries). {lead['action']}"
         else:
@@ -305,7 +319,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             ("Outcome", headline),
             ("First action", next_step),
             ("Scope", f"{len(config)} recognized ZIP files; {skipped} entries not opened. "
-                      f"{len(resources)} Azure resources and {len(graph)} Graph observations were read from the upload."),
+                      f"{len(resources)} Azure resources, {len(graph)} Entra observations, and "
+                      f"{summary['m365_observations']} Microsoft 365 observations were read from the upload."),
             ("Evidence gaps", f"{no_finding} evidence rows returned no finding; {summary['model_insufficient']} were insufficient. "
                               f"{missing} resource/control pairs had no supported field in the upload and were not sent."),
             ("Foundry calls", f"{len(foundry_receipts)} completed responses covering {model_pattern_count} distinct patterns. "
@@ -334,7 +349,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         if item["properties"].get("publicNetworkAccess") is None:
             system_counts[system]["public_unknown"] += 1
     for _, resource, system, level, _ in active:
-        if resource["type"] != "microsoft.graph":
+        if not resource["type"].startswith("microsoft.graph"):
             system_counts[system][level] += 1
     registered_systems = sorted(system_counts.keys() | groups_by_system.keys())
     def classification(system):
@@ -458,6 +473,16 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
          "Microsoft Learn — primary", "Microsoft Learn — follow-up"),
         entra_review(graph), "These are configuration review prompts, not new findings or proof of tenant-wide enforcement.")
     add("Security posture", "entra", "Entra — Graph configuration summary", ("Source", "Control", "Value"), graph)
+    add("Microsoft 365", "configuration", "SharePoint, OneDrive, and Teams configuration",
+        ("Evidence scope", "Source", "Setting", "Observed value"),
+        ((scope["id"], scope["source"], field, value) for scope in m365
+         for field, value in sorted(scope["properties"].items())),
+        "Only tenant settings for SharePoint and OneDrive and guest channel settings for supplied Teams are shown. "
+        "Missing settings, other workloads, and content are not assessed.")
+    add("Microsoft 365", "foundry-decisions", "Microsoft 365 decisions from Foundry",
+        ("Control", "Evidence scope", "Setting", "Observed value", "Source", "Decision", "Model severity"),
+        (row for row in model_rows if row[1] in m365_ids),
+        "Team IDs are pseudonymized. A tenant setting or team guest permission does not prove that content was shared.")
     add("Security posture", "azure-posture", "Defender for Cloud and Azure Policy — aggregates",
         ("Subscription", "Indicator", "Source", "Value"), posture,
         "Only visible aggregates are shown. Defender assessments and Azure Policy states are not counts of unique resources. Active alerts are counted by severity without entities or descriptions. A missing row does not establish that there are no alerts.")
@@ -504,7 +529,7 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
         ("Live Azure inventory", "run" if live is not None else "not_collected", "Requires separate approval."),
         *list((item["area"], item["status"], item["detail"]) for item in (live or {}).get("coverage", [])),
         ("Security Posture review", review_status.get("posture", "Not called"), "Allowlisted Azure evidence only."),
-        ("Compliance review", review_status.get("compliance", "Not called"), "Allowlisted Entra evidence only."),
+        ("Compliance review", review_status.get("compliance", "Not called"), "Allowlisted Entra and Microsoft 365 evidence only."),
     ])
     add("Method and limits", "cross-check", "ARG ↔ ARM reconciliation", ("Resource", "Sources"), overlap,
         "Check coverage status. Differences may reflect indexing delays, child resources, incomplete pagination, or missing access.")

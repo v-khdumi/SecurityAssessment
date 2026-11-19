@@ -27,6 +27,14 @@ CONFIG_REVIEW = {
 }
 
 REVIEW_PLANS = {
+    "Microsoft 365": (
+        ("Confirm sharing and collaboration scope", "SharePoint, OneDrive, and Teams service owners",
+         "Approved tenant sharing settings and guest channel settings for the teams in scope.",
+         "Distinguish tenant defaults from site settings and effective guest access. Confirm exceptions before changing policy."),
+        ("Check what the export omitted", "Microsoft 365 assessment lead",
+         "Supported Graph settings and the approved scope of exported teams.",
+         "Keep unexported teams, unsupported workloads, and content out of the decision. Missing settings are not a pass."),
+    ),
     "Summary": (
         ("Agree the review order", "Assessment lead and affected owners",
          "Prioritized findings, resource-control coverage, and reports of missing or denied scope.",
