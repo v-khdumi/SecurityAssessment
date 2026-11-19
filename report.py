@@ -222,8 +222,13 @@ def render(tables, timestamp, summary):
     narrative = "".join(f"<p><strong>{esc(topic)}:</strong> {esc(detail)}</p>" for topic, detail in executive)
     if narrative:
         narrative = f'<article><h3>Executive summary</h3>{narrative}</article>'
-    partial = ('<p class="notice"><strong>Partial assessment:</strong> Some evidence is missing or was skipped. '
-               '<a href="#archive-import">See archive import coverage</a>.</p>') if summary.get("partial_import") else ""
+    partial = ""
+    if summary.get("coverage_only"):
+        partial = ('<p class="notice"><strong>Coverage only:</strong> No settings were assessed by Foundry. '
+                   '<a href="#archive-import">See archive import coverage</a>.</p>')
+    elif summary.get("partial_import") or summary.get("missing_resource_controls") or summary.get("model_insufficient"):
+        partial = ('<p class="notice"><strong>Partial assessment:</strong> Some evidence is missing, insufficient, or was skipped. '
+                   '<a href="#archive-import">See archive import coverage</a> and review the evidence gaps below.</p>')
     overview = f"""{partial}{narrative}<div class="metrics">
 <div class="metric"><b>{summary["high"]}</b>High-priority findings</div>
 <div class="metric"><b>{summary["findings"]}</b>Total findings</div>

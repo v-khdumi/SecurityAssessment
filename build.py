@@ -15,9 +15,10 @@ import stat
 import sys
 
 from controls import GRAPH_RULES, GUIDANCE, M365_RULES, NIS2, QUESTIONS, RULES, WEB, findings
-from evidence import (PROWLER_CATALOGS, SHAREPOINT_SHARING_CAPABILITIES, TYPES, EvidenceError,
+from evidence import (NATIVE_AZURE, PROWLER_CATALOGS, SHAREPOINT_SHARING_CAPABILITIES, TYPES, EvidenceError,
                       conditional_access_config, graph_config, m365_config,
-                      project_costs, project_functions, project_inventory, project_posture, prowler_config, read_archive)
+                      project_costs, project_functions, project_inventory, project_posture, prowler_config, read_archive,
+                      zip_inventory)
 from microsoft_guidance import FINDING_REFERENCES, SECTION_REFERENCES, entra_review, reference_rows, url
 from report import render
 from tab_review import CONFIG_REVIEW, REVIEW_PLANS
@@ -191,8 +192,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     archive = prepared_archive if prepared_archive is not None else read_archive(blob) if blob is not None else None
     config, skipped = (archive.config, archive.skipped) if archive is not None else ({}, 0)
     sources = []
-    if "assessment-v1.json" in config:
-        raw = config["assessment-v1.json"]
+    raw = zip_inventory(config)
+    if raw is not None:
         sources.append((raw, False))
     if live is not None:
         sources.append((live, True))
@@ -278,21 +279,28 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     has_evidence = bool(resources or rbac or graph or m365 or costs or posture or functions
                         or any(row[4] in {"pass", "fail"} for row in checks))
     partial_files = sum(status == "Partial" for _, status, _ in archive.decisions) if archive is not None else 0
+    coverage_only = model_selected and not model_rows
+    missing_controls = sum(eligible.values()) - sum(observed.values())
+    model_resource_ids = {row[1] for row in model_rows if row[1].startswith("res-")}
     summary = {"resources": len(resources), "findings": len(active), "high": counts["High"],
                "skipped": skipped, "eligible_files": len(config), "graph_observations": len(graph),
                "partial_files": partial_files,
+               "azure_resources_with_model_decisions": len(model_resource_ids),
                "m365_observations": sum(len(scope["properties"]) for scope in m365),
                "controls_with_evidence": len(observed), "available_controls": len(RULES),
                "priority": priority,
                "has_evidence": has_evidence, "live_azure": live is not None,
-               "analysis_mode": "Foundry" if model_selected else "Local rules",
+               "analysis_mode": ("Coverage only (Foundry not called)" if coverage_only else
+                                 "Foundry" if model_selected else "Local rules"),
+               "coverage_only": coverage_only, "missing_resource_controls": missing_controls,
                "model_evidence_rows": len(model_rows), "model_patterns": model_pattern_count,
                "foundry_requests": len(foundry_receipts),
-               "partial_import": skipped > 0 or partial_files > 0 or (uploaded and (not resources or not m365)),
+               "partial_import": uploaded and (bool(archive.coverage_issues()) or not resources or not m365),
                "model_insufficient": sum(row[-2] == "insufficient" for row in model_rows)}
     attention = [
         ("Breach status", "Not assessed. These sources neither confirm nor rule out an incident."),
-        ("Resources with metadata", len(resources)),         ("Findings (control/evidence pairs)", len(active)),
+        ("Resources with metadata", len(resources)), ("Findings (control/evidence pairs)", len(active)),
+        ("Azure resources with Foundry decisions", len(model_resource_ids) if model_selected else "Not run"),
         ("Assessment engine", summary["analysis_mode"]),
         ("High", counts["High"]), ("Medium", counts["Medium"]), ("Low", counts["Low"]),
         ("Subscriptions observed", len(subs)), ("Resource groups observed", len(groups)),
@@ -308,12 +316,17 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
     if archive is not None:
         add("Summary", "archive-import", "Archive import coverage", ("ZIP entry", "Disposition", "Configuration type or reason"),
             archive.decisions, "Entry numbers are positions in the ZIP directory (including folders). "
-            "Filenames, file contents, and skipped data are not included. Imported does not mean every field was assessed.")
+            "Filenames, file contents, and skipped data are not included. Imported does not mean every field was assessed. "
+            "For an unrecognized format, re-export the approved configuration as JSON, NDJSON, or an Azure inventory CSV "
+            "with id and type columns. For an invalid record or an API error, correct the source export and upload it again. "
+            "If pagination is reported, include all pages. Do not upload logs, secrets, or customer data.")
     if model_selected:
         scope_count = len({resource["id"] for _, resource, _, _, _ in active if not resource["type"].startswith("microsoft.graph")})
         no_finding = sum(row[-2] == "no_finding" for row in model_rows)
-        missing = sum(eligible.values()) - sum(observed.values())
-        if active:
+        if coverage_only:
+            headline = "Not assessed. No supported configuration settings reached Foundry. No security conclusion can be drawn."
+            next_step = "Use Archive import coverage and Evidence to obtain to correct the export before rerunning."
+        elif active:
             label = "finding" if len(active) == 1 else "findings"
             headline = (f"Foundry identified {len(active)} {label} ({counts['High']} high, {counts['Medium']} medium, "
                         f"{counts['Low']} low) affecting {scope_count} of {len(resources)} inventoried Azure resources.")
@@ -334,25 +347,47 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
                       f"{len(resources)} Azure resources, {len(graph)} Entra observations, and "
                       f"{summary['m365_observations']} Microsoft 365 observations were read from the upload."),
             ("Evidence gaps", f"{no_finding} evidence rows returned no finding; {summary['model_insufficient']} were insufficient. "
-                              f"{missing} resource/control pairs had no supported field in the upload and were not sent."),
+                              f"{missing_controls} resource/control pairs had no supported field in the upload and were not sent."),
             ("Foundry calls", f"{len(foundry_receipts)} completed responses covering {model_pattern_count} distinct patterns. "
                               "See Method and limits for request IDs, model metadata, and timings when available."),
         ]
+        if NATIVE_AZURE in config:
+            summary["executive"].insert(2, ("Azure inventory coverage",
+                                            f"{len(model_resource_ids)} of {len(resources)} inventoried resources have Foundry decisions. "
+                                            "Listings with only an ID, type, and location cannot establish configuration settings."))
         missing_domains = [label for label, available in (("Azure resource inventory", resources), ("Microsoft 365 configuration", m365))
                            if not available]
         if missing_domains:
             summary["executive"].insert(1, ("Not assessed", ", ".join(missing_domains)
                                             + " was not supplied in a supported format. Check Archive import coverage."))
         add("Summary", "executive-summary", "Executive summary", ("Topic", "Conclusion"), summary["executive"])
+        add("Summary", "evidence-to-obtain", "Evidence to obtain", ("Scope", "Status", "Next step"), (
+            (scope, "Not assessed", action)
+            for scope, available, action in (
+                ("Azure resource configuration", bool(model_resource_ids),
+                 "Export ARM or Azure Resource Graph resource metadata with the security settings, not just resource IDs and types."),
+                ("Entra configuration", any(row[1] == "Entra policy configuration" for row in model_rows),
+                 "Include the Graph authorization policy and authentication methods policy configuration responses."),
+                ("Conditional Access", bool(ca_policies),
+                 "Include all Graph Conditional Access policy pages with policy states, conditions, and grant controls."),
+                ("SharePoint and OneDrive", any(item["type"] == "microsoft.graph/sharepoint" for item in m365),
+                 "Include the Microsoft Graph SharePoint tenant configuration response with sharing and security settings."),
+                ("Teams", any(item["type"] == "microsoft.graph/team" for item in m365),
+                 "Include team settings from Microsoft Graph with each team's ID and guest settings. Do not include messages or members."),
+            ) if not available
+        ), "Missing or unsupported inputs establish neither compliance nor noncompliance. "
+           "Use Resource control coverage to identify fields still needed for inventoried resources.")
     hits = Counter(rule.key for rule, *_ in active)
     coverage_rows = [(rule.key, rule.title, observed[rule.key], eligible[rule.key] - observed[rule.key], hits[rule.key],
                       "No resources in scope" if not eligible[rule.key] else
                       "No evidence" if not observed[rule.key] else
-                      "Partial evidence" if observed[rule.key] < eligible[rule.key] else "Evidence available")
+                      "Partial evidence" if observed[rule.key] < eligible[rule.key] else "Evidence available",
+                      rule.field if observed[rule.key] < eligible[rule.key] else None)
                      for rule in sorted(RULES, key=lambda rule: (not hits[rule.key], rule.key))]
     add("Summary", "resource-coverage", "Resource control coverage",
-        ("Key", "Control", "Resources with evidence", "Resources without evidence", "Findings", "Status"),
-        coverage_rows, "Resources in scope are determined by type in this snapshot. Evidence availability is not a pass, and does not measure tenant-wide coverage. Graph and Prowler evidence are shown in Security posture.")
+        ("Key", "Control", "Resources with evidence", "Resources without evidence", "Findings", "Status", "Missing setting"),
+        coverage_rows,
+        "Resources in scope are determined by type in this snapshot. Evidence availability is not a pass, and does not measure tenant-wide coverage. Graph and Prowler evidence are shown in Security posture.")
     system_counts = defaultdict(Counter)
     groups_by_system = defaultdict(list)
     for group in groups:
@@ -547,7 +582,8 @@ def dataset(blob, live, reviews, review_status, timestamp, key, assignments, pre
             ("DPO", "Confirm retention, access, Article 30 records, and whether an Article 35 DPIA is needed."),
         ))
     add("Method and limits", "input", "Sources and coverage", ("Area", "Status", "Detail"), [
-        ("ZIP", "imported" if uploaded else "not_collected", "Only recognized configuration entries are opened. Imported inventories are not guaranteed complete."),
+        ("ZIP", "imported" if config else "no supported configuration" if uploaded else "not_collected",
+         "Only recognized configuration is imported. Imported inventories are not guaranteed complete."),
         ("Live Azure inventory", "run" if live is not None else "not_collected", "Requires separate approval."),
         *list((item["area"], item["status"], item["detail"]) for item in (live or {}).get("coverage", [])),
         ("Security Posture review", review_status.get("posture", "Not called"), "Allowlisted Azure evidence only."),
@@ -755,7 +791,7 @@ def main():
     try:
         if args.inspect_zip:
             with args.inspect_zip.open("rb") as file:
-                imported = read_archive(file)
+                imported = read_archive(file, recover_members=True)
             for (status, reason), count in sorted(Counter((status, reason) for _, status, reason in imported.decisions).items()):
                 print(f"{count} {status.lower()}: {reason}")
             if not imported.decisions:

@@ -36,7 +36,7 @@ async function loadReadiness() {
     reviewConfigured = false;
     element("foundry-status").textContent = "Setup check failed";
   }
-  element("review-label").textContent = reviewConfigured ? "Review and confirm" : "Connect review agents";
+  element("review-label").textContent = "Review and confirm";
 }
 
 function populateSetup(settings) {
@@ -110,8 +110,9 @@ element("setup-form").addEventListener("submit", async event => {
 
 element("review").addEventListener("click", () => {
   if (!ready) return;
-  if (!reviewConfigured) {
-    openSetup();
+  if (revision === null) {
+    loadReadiness();
+    element("status").textContent = "Checking assessment setup. Try again once the check completes.";
     return;
   }
   const archive = element("archive").files[0];
@@ -124,7 +125,9 @@ element("review").addEventListener("click", () => {
     return;
   }
   const categories = [];
-  categories.push("Only your uploaded ZIP is used. The approved assessment host detects JSON and NDJSON by content, records unsupported data, and removes the temporary archive after parsing.");
+  categories.push("Only your uploaded ZIP is used. The approved assessment host detects supported JSON, NDJSON, and Azure inventory CSV by content. It records unsupported data and removes the temporary archive after parsing.");
+  categories.push("Missing, unsupported, or partially imported evidence is listed in the report. Foundry assesses the supported settings only. If none are available, the app writes a coverage-only report without contacting Foundry.");
+  if (!reviewConfigured) categories.push("Foundry is not configured. You can produce a coverage-only report if there are no supported settings. Configure Setup to assess any supported settings.");
   categories.push("Foundry receives only allowlisted Azure, Entra, and Microsoft 365 setting values and temporary row numbers. It determines the findings. No ZIP, resource, team or principal IDs, names, logs, costs, or raw metrics are sent. Calls can incur costs and produce telemetry.");
   confirmRun({archive, revision}, categories);
 });
@@ -144,10 +147,10 @@ function confirmRun(settings, categories) {
 
 function showResult(reply) {
   const notice = element("result-notice");
-  notice.hidden = reply.has_evidence && !reply.partial_import;
-  notice.textContent = reply.has_evidence
-    ? "Partial assessment. See Archive import coverage in the report for skipped files and missing scope."
-    : "No usable configuration evidence. Zero findings is not a clean bill of health.";
+  notice.hidden = !reply.coverage_only && !reply.partial_import && !reply.missing_resource_controls && !reply.model_insufficient;
+  notice.textContent = reply.coverage_only
+    ? "Coverage only. Foundry did not assess any settings. Open the report to see what to re-export."
+    : "Partial assessment. Open the report for skipped entries, missing settings, and next steps.";
   element("metric-high").textContent = reply.high;
   element("metric-findings").textContent = reply.findings;
   element("metric-resources").textContent = reply.resources;
@@ -165,11 +168,17 @@ function showResult(reply) {
     return row;
   }));
   element("no-priority").hidden = reply.priority.length > 0;
+  element("no-priority").textContent = reply.coverage_only
+    ? "Open the report and use Evidence to obtain to prepare a new export."
+    : "No findings were produced from the evidence available. Check coverage before drawing conclusions.";
   element("result-coverage").textContent = `${reply.controls_with_evidence} of ${reply.available_controls} resource controls had configuration evidence. This is coverage, not a pass rate. Graph observations are separate policy settings.`;
   element("result-sources").textContent = `Recognized configuration types: ${reply.eligible_files}. Entries skipped: ${reply.skipped}. Entries partially imported: ${reply.partial_files ?? 0}.`;
-  element("result-ai").textContent = `Foundry returned ${reply.foundry_requests} responses for ${reply.model_patterns} distinct configuration patterns, covering ${reply.model_evidence_rows} evidence rows. ${reply.model_insufficient} rows had insufficient evidence. See Method and limits for request receipts.`;
+  element("result-ai").textContent = reply.coverage_only
+    ? "Foundry was not called. No supported configuration settings were available for evaluation."
+    : `Foundry returned ${reply.foundry_requests} responses for ${reply.model_patterns} distinct configuration patterns, covering ${reply.model_evidence_rows} evidence rows. ${reply.model_insufficient} rows had insufficient evidence. See Method and limits for request receipts.`;
   element("open-report").href = reply.preview;
   element("open-findings").href = `${reply.preview}#findings`;
+  element("open-findings").hidden = reply.coverage_only;
   element("download").href = reply.download;
   element("result").hidden = false;
   element("report-title").focus({preventScroll: true});
@@ -307,7 +316,7 @@ element("start").addEventListener("click", async () => {
       return;
     }
     progress.finish(true);
-    status.textContent = "Local snapshot created.";
+    status.textContent = reply.coverage_only ? "Coverage report saved. No configuration was assessed." : "Local snapshot created.";
     showResult(reply);
   } catch {
     status.textContent = "The connection closed before the assessment result arrived. Check whether the app is running and try again.";

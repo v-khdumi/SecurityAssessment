@@ -196,9 +196,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.payload(409, {"error": "Connection setup changed. Review the current settings and confirm the assessment again."})
                 return
             connection = setup.foundry
-            if connection is None:
-                self.payload(400, {"error": "Set the Azure OpenAI endpoint, deployment, and API key in Setup."})
-                return
             with TemporaryFile(dir=build.output_root(self.server.output)) as upload:
                 remaining = length
                 while remaining:
@@ -218,27 +215,32 @@ class Handler(BaseHTTPRequestHandler):
                     self.streaming = True
                     self.close_connection = True
                 self.progress("upload", "done", "ZIP received on the assessment host.")
-                self.progress("evidence", "running", "Checking JSON content for supported configuration on the assessment host.")
-                prepared_archive = read_archive(upload)
+                self.progress("evidence", "running", "Detecting supported configuration by content on the assessment host.")
+                prepared_archive = read_archive(upload, recover_members=True)
             self.progress("evidence", "done", "Archive validated. The temporary upload is closed.")
             self.progress("prepare", "running", "Checking the ZIP for supported assessment evidence.")
-            if not prepared_archive.config:
-                raise EvidenceError(
-                    "No supported configuration was found in the ZIP. JSON filenames do not need to be changed. "
-                    "Upload configuration data from a supported Graph endpoint or a normalized Azure inventory. "
-                    "Sign-in, audit, and application logs are not assessed."
-                )
+            if self.headers.get("X-Assessment-Coverage") == "require-all-evidence-entries":
+                prepared_archive.require_all_evidence_entries()
+            unresolved = sum(prepared_archive.coverage_issues().values())
+            entry_label = "entry" if unresolved == 1 else "entries"
+            gap_detail = (f" {unresolved} {entry_label} could not be fully imported; see Archive import coverage in the report."
+                          if unresolved else "")
             status = {}
 
             def assess(batches):
                 nonlocal status
                 count = sum(map(len, batches.values()))
                 if not count:
-                    raise EvidenceError(
-                        "The recognized files contain no supported configuration settings for Foundry to assess. "
-                        "Check the expected JSON fields in the Accepted ZIP format section of the README."
-                    )
-                self.progress("prepare", "done", f"Prepared {count} configuration patterns for Foundry.")
+                    reason = "No supported configuration settings to assess."
+                    status = {role: f"Not called: {reason}" for role in batches}
+                    self.progress("prepare", "done", reason + gap_detail)
+                    for role in batches:
+                        self.progress(role, "skipped", reason)
+                    self.progress("report", "running", "Writing coverage and recovery guidance without Foundry decisions.")
+                    return {}, status, []
+                if connection is None:
+                    raise EvidenceError("Set the Azure OpenAI endpoint, deployment, and API key in Setup to assess the supported settings.")
+                self.progress("prepare", "done", f"Prepared {count} configuration patterns for Foundry." + gap_detail)
                 decisions, status, receipts = assess_evidence(connection, batches, self.progress)
                 self.progress("report", "running", "Writing the Foundry decisions to the report.")
                 return decisions, status, receipts

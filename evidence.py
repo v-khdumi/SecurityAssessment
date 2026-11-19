@@ -1,5 +1,6 @@
 """Local, allowlisted evidence adapters. No archive member is extracted to disk."""
 
+import csv
 import hashlib
 import hmac
 import io
@@ -9,6 +10,7 @@ import stat
 import zipfile
 import zlib
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, BOM_UTF32_BE, BOM_UTF32_LE, BOM_UTF8
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 
@@ -28,14 +30,16 @@ SHAREPOINT_SHARING_CAPABILITIES = {
     "disabled", "externalUserSharingOnly", "externalUserAndGuestSharing", "existingExternalUserSharingOnly",
 }
 PROWLER_CATALOGS = {"prowler-cis-azure.json": "CIS", "prowler-nis2-azure.json": "NIS2"}
+NATIVE_AZURE = "Azure ARM or Resource Graph inventory"
 CONDITIONAL_ACCESS_STATES = ("enabled", "disabled", "enabledForReportingButNotEnforced")
 SHAREPOINT_FLAGS = ("isLegacyAuthProtocolsEnabled", "isResharingByExternalUsersEnabled",
                     "isRequireAcceptingUserToMatchInvitedUserEnabled", "isUnmanagedSyncAppForTenantRestricted")
 TEAM_GUEST_FLAGS = ("allowCreateUpdateChannels", "allowDeleteChannels")
 NON_CONFIGURATION_MEMBERS = {
-    "sha256sums", "sha256sumserrors", "error", "errors", "exporterrors", "signins", "signinlogs", "auditlogs",
+    "sha256sumserrors", "error", "errors", "exporterrors", "signins", "signinlogs", "auditlogs",
     "directoryaudits", "applicationlogs",
 }
+CHECKSUM_DISPOSITION = "Checksum manifest (not assessment evidence)"
 GUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.I)
 SCOPE = re.compile(
     r"/(?:subscriptions/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
@@ -141,6 +145,21 @@ class ArchiveImport:
     config: dict
     skipped: int
     decisions: list[tuple[int, str, str]]
+
+    def coverage_issues(self):
+        return Counter(reason for _, status, reason in self.decisions
+                       if status != "Imported" and reason != CHECKSUM_DISPOSITION)
+
+    def require_all_evidence_entries(self):
+        issues = self.coverage_issues()
+        if issues:
+            details = "; ".join(f"{count} × {reason}" for reason, count in issues.most_common(3))
+            if len(issues) > 3:
+                details += "; additional reasons are available in the ZIP inspection"
+            raise EvidenceError(
+                f"Assessment not started: {sum(issues.values())} ZIP entries could not be fully imported. "
+                f"{details}. Correct the export or run ZIP inspection for the full breakdown. No data was sent to Foundry."
+            )
 
 
 def parse_json(raw):
@@ -360,15 +379,156 @@ def configuration_document(document, conditional_access_hint=False):
     return None
 
 
-def structured_encoding(prefix):
+def text_encoding(prefix):
     for bom, encoding in ((BOM_UTF32_BE, "utf-32"), (BOM_UTF32_LE, "utf-32"),
                           (BOM_UTF16_BE, "utf-16"), (BOM_UTF16_LE, "utf-16"), (BOM_UTF8, "utf-8-sig")):
         if prefix.startswith(bom):
-            return encoding if prefix.decode(encoding, errors="replace").lstrip().startswith(("{", "[")) else None
-    return "utf-8" if prefix.lstrip().startswith((b"{", b"[")) else None
+            return encoding
+    return "utf-8"
 
 
-def configuration_records(document, conditional_access_hint=False):
+def azure_resource_row(record):
+    row = as_dict(record)
+    rid, kind = row.get("id"), row.get("type")
+    if not is_scope(rid) or not isinstance(kind, str):
+        return None
+    kind = kind.lower()
+    sub, group = scope_parts(rid)
+    if kind == "microsoft.resources/subscriptions" and sub and rid.lower() == f"/subscriptions/{sub.lower()}":
+        return "subscriptions", sub.lower()
+    if kind in {"microsoft.resources/subscriptions/resourcegroups", "microsoft.resources/resourcegroups"} and group == rid:
+        return "groups", group
+    if "/providers/" not in rid.lower():
+        return None
+    parts = re.split(r"/providers/", rid, flags=re.I)[-1].split("/")
+    if len(parts) < 3 or len(parts) % 2 == 0 or "/".join([parts[0], *parts[1::2]]).lower() != kind:
+        return None
+    settings = as_dict(row.get("properties"))
+    if kind == "microsoft.authorization/roleassignments":
+        scope, principal, role_id = (settings.get(field, row.get(field))
+                                     for field in ("scope", "principalId", "roleDefinitionId"))
+        if not (is_scope(scope) and is_guid(principal) and isinstance(role_id, str)
+                and is_guid(role_id.rsplit("/", 1)[-1])):
+            return None
+        return "rbac", {"scope": scope, "principalId": principal, "roleDefinitionId": role_id.rsplit("/", 1)[-1],
+                        "principalType": checked(settings.get("principalType", row.get("principalType")), PRINCIPALS, "Unknown")}
+    projected = properties(row)
+    projected.update({field: settings[field] for field in ("publicNetworkAccess",) if field in settings})
+    if kind in {"microsoft.web/sites", "microsoft.web/sites/slots"}:
+        site = as_dict(settings.get("siteConfig"))
+        for field in ("httpsOnly", "clientCertEnabled"):
+            if field in settings:
+                projected[field] = settings[field]
+        for field, source in (
+            ("minTlsVersion", "minTlsVersion"), ("minScmTlsVersion", "scmMinTlsVersion"),
+            ("remoteDebuggingEnabled", "remoteDebuggingEnabled"), ("ftpsState", "ftpsState"),
+        ):
+            if source in site:
+                projected[field] = site[source]
+        origins = as_dict(site.get("cors")).get("allowedOrigins")
+        if isinstance(origins, list) and all(isinstance(origin, str) for origin in origins):
+            projected["corsAnyOrigin"] = "*" in origins
+    elif kind == "microsoft.storage/storageaccounts":
+        for field, source in (("allowBlobPublicAccess", "allowBlobPublicAccess"),
+                              ("secureTransferRequired", "supportsHttpsTrafficOnly"),
+                              ("minTlsVersion", "minimumTlsVersion")):
+            if source in settings:
+                projected[field] = settings[source]
+        tls = projected.get("minTlsVersion")
+        if isinstance(tls, str) and re.fullmatch(r"TLS1_[0-3]", tls):
+            projected["minTlsVersion"] = tls[3:].replace("_", ".")
+    elif kind == "microsoft.keyvault/vaults" and "enablePurgeProtection" in settings:
+        projected["enablePurgeProtection"] = settings["enablePurgeProtection"]
+    resource = {"id": rid, "type": kind, **properties(projected)}
+    if location := checked(row.get("location"), CURRENT_REGIONS):
+        resource["location"] = location
+    return "resources", resource
+
+
+def azure_export(document):
+    body = as_dict(document)
+    source = body.get("data", body.get("value", body.get("resources", document)))
+    raw_table = as_dict(source)
+    if isinstance(raw_table.get("columns"), list) and isinstance(raw_table.get("rows"), list):
+        columns = [as_dict(column).get("name") for column in raw_table["columns"]]
+        if not all(isinstance(name, str) for name in columns) or not {"id", "type"}.issubset(columns):
+            return None
+        if len(columns) != len(set(columns)) or len(raw_table["rows"]) > MAX_ROWS:
+            raise EvidenceError("The Azure Resource Graph table has duplicate columns or exceeds the row limit.")
+        source = (dict(zip(columns, values)) if isinstance(values, list) and len(values) == len(columns)
+                  else None for values in raw_table["rows"])
+    elif isinstance(source, list):
+        if len(source) > MAX_ROWS:
+            raise EvidenceError("The Azure export exceeds the row limit.")
+    else:
+        source = [source]
+    inventory = {field: [] for field in ("resources", "subscriptions", "groups", "rbac")}
+    unrecognized = []
+    for row in source:
+        match = azure_resource_row(row)
+        if match is None:
+            unrecognized.append(row)
+        else:
+            field, value = match
+            inventory[field].append(value)
+    if not any(inventory.values()):
+        return None
+    truncated = (bool(body.get("nextLink") or body.get("$skipToken") or body.get("skipToken"))
+                 or str(body.get("resultTruncated")).lower() == "true"
+                 or (type(body.get("count")) is int and type(body.get("totalRecords")) is int
+                     and body["count"] < body["totalRecords"]))
+    return inventory, unrecognized, truncated
+
+
+def azure_csv_header(first_line):
+    for delimiter in (",", ";", "\t"):
+        try:
+            fields = next(csv.reader(io.StringIO(first_line), delimiter=delimiter, strict=True))
+        except csv.Error:
+            continue
+        except StopIteration:
+            return None
+        columns = [name.strip().lower() for name in fields]
+        if {"id", "type"}.issubset(columns):
+            if len(columns) != len(set(columns)):
+                raise EvidenceError("The Azure CSV has duplicate column names.")
+            return delimiter, columns
+    return None
+
+
+def azure_csv_document(raw, header, encoding):
+    delimiter, columns = header
+    names = {field.lower(): field for field in ("id", "type", "location", *BOOLEANS, *ENUMS, *COUNTS)}
+    data = []
+    try:
+        reader = csv.reader(io.StringIO(raw.decode(encoding)), delimiter=delimiter, strict=True)
+        next(reader)
+        for values in reader:
+            if not values:
+                continue
+            if len(data) >= MAX_ROWS:
+                raise EvidenceError("The Azure CSV exceeds the row limit.")
+            if len(values) != len(columns):
+                raise EvidenceError("An Azure CSV row does not match the header column count.")
+            row = {}
+            for name, value in zip(columns, values):
+                field = names.get(name)
+                if field is None or not value.strip():
+                    continue
+                value = value.strip()
+                if field in BOOLEANS and value.lower() in {"true", "false"}:
+                    row[field] = value.lower() == "true"
+                elif field in COUNTS and re.fullmatch(r"[0-9]{1,13}", value):
+                    row[field] = int(value)
+                else:
+                    row[field] = value
+            data.append(row)
+    except (UnicodeError, csv.Error) as exc:
+        raise EvidenceError("The Azure CSV has invalid text encoding or quoting.") from exc
+    return {"data": data}
+
+
+def configuration_records(document, conditional_access_hint=False, *, allow_batch=True):
     body = as_dict(document)
     if "error" in body:
         yield None, "API error response"
@@ -382,25 +542,41 @@ def configuration_records(document, conditional_access_hint=False):
             if len(supported) != len(teams):
                 yield None, "Teams record has no supported guest configuration"
                 match = name, {"value": supported}
+        if "@odata.nextLink" in body:
+            yield None, "Graph export indicates incomplete pagination"
         yield match, None
         return
+    native = azure_export(document)
+    if native is not None:
+        inventory, unrecognized, truncated = native
+        yield (NATIVE_AZURE, inventory), None
+        for row in unrecognized:
+            match = configuration_document(row)
+            yield match, None if match is not None else "Azure export has rows outside the supported metadata format"
+        if truncated:
+            yield None, "Azure export indicates incomplete pagination"
+        return
     batch = body.get("responses")
-    if isinstance(batch, list) and all(type(as_dict(row).get("status")) is int for row in batch):
+    if allow_batch and isinstance(batch, list) and all(type(as_dict(row).get("status")) is int for row in batch):
         if len(batch) > MAX_ROWS:
             raise EvidenceError("The Graph batch exceeds the row limit.")
         for row in batch:
             if not 200 <= row["status"] < 300 or "error" in as_dict(row.get("body")):
                 yield None, "API error response"
                 continue
-            match = configuration_document(row.get("body"))
-            yield match, None if match is not None else "Batch body has no supported configuration"
+            for matched, reason in configuration_records(row.get("body"), allow_batch=False):
+                if reason in {"JSON content has no supported configuration", "Collection item has no supported configuration"}:
+                    reason = "Batch body has no supported configuration"
+                yield matched, reason
         if not batch:
             yield None, "Empty Graph batch"
         return
     records = body.get("value", document)
     if isinstance(records, list) and records:
+        if "@odata.nextLink" in body:
+            yield None, "Graph export indicates incomplete pagination"
         for record in records:
-            match = configuration_document(record)
+            match = configuration_document(record, conditional_access_hint)
             yield match, None if match is not None else "Collection item has no supported configuration"
         return
     yield None, "JSON content has no supported configuration"
@@ -434,6 +610,13 @@ def add_configuration(config, name, body):
     if name not in config:
         config[name] = body
         return
+    if name == NATIVE_AZURE:
+        for field, entries in body.items():
+            saved = config[name][field]
+            if len(saved) + len(entries) > MAX_ROWS:
+                raise EvidenceError("The combined Azure exports exceed the row limit.")
+            saved.extend(entries)
+        return
     if name not in {"teamsConfiguration.json", "conditionalAccessPolicies.json"}:
         raise EvidenceError(f"The ZIP contains more than one {name} configuration. Include only one copy, even across folders.")
     entries = config[name]["value"]
@@ -444,7 +627,40 @@ def add_configuration(config, name, body):
         config[name]["@odata.nextLink"] = None
 
 
-def read_archive(source):
+def zip_inventory(config):
+    normalized = config.get("assessment-v1.json")
+    native = config.get(NATIVE_AZURE)
+    if native is None:
+        return normalized
+    result = dict(normalized or {})
+    for field in ("groups", "subscriptions", "rbac"):
+        items = result.get(field, [])
+        if not isinstance(items, list):
+            raise EvidenceError("An inventory field does not match the schema.")
+        result[field] = items + native[field]
+    existing = {}
+    items = result.get("resources", [])
+    for item in rows(items):
+        rid = item.get("id")
+        if is_scope(rid):
+            if rid.lower() in existing:
+                raise EvidenceError("The ZIP inventory contains duplicate resource IDs.")
+            existing[rid.lower()] = dict(item)
+    for item in native["resources"]:
+        resource = existing.setdefault(item["id"].lower(), {})
+        for field, value in item.items():
+            previous = resource.get(field)
+            if isinstance(previous, str) and isinstance(value, str) and field in {"id", "type"}:
+                previous = previous.lower()
+                value = value.lower()
+            if previous is not None and (type(previous) is not type(value) or previous != value):
+                raise EvidenceError("The Azure inventory has conflicting values for one resource. Export a consistent snapshot.")
+            resource[field] = value
+    result["resources"] = list(existing.values())
+    return result
+
+
+def read_archive(source, *, recover_members=False):
     file = io.BytesIO(source) if isinstance(source, bytes) else source
     size = file.seek(0, io.SEEK_END)
     if not 0 < size <= MAX_ZIP:
@@ -464,13 +680,15 @@ def read_archive(source):
                 filename = parts[-1]
                 if not filename:
                     continue
-                excluded = any(
-                    re.sub(r"[-_ .]", "", re.sub(r"\.(?:json|ndjson|jsonl)$", "", part.lower()))
-                    in NON_CONFIGURATION_MEMBERS for part in parts
-                )
-                if excluded:
+                member_keys = [re.sub(r"[-_ .]", "", re.sub(r"\.(?:json|ndjson|jsonl)$", "", part.lower()))
+                               for part in parts]
+                if any(name in NON_CONFIGURATION_MEMBERS for name in member_keys):
                     skipped += 1
-                    decisions.append((index, "Skipped", "Excluded log, error, or checksum"))
+                    decisions.append((index, "Skipped", "Excluded log or export error file"))
+                    continue
+                if member_keys[-1] == "sha256sums":
+                    skipped += 1
+                    decisions.append((index, "Skipped", CHECKSUM_DISPOSITION))
                     continue
                 if "" in parts or ".." in parts or any(":" in part for part in parts) or "\x00" in entry.orig_filename:
                     raise EvidenceError("The ZIP contains an unsafe path for a file.")
@@ -487,24 +705,55 @@ def read_archive(source):
                     continue
                 with archive.open(entry) as stream:
                     prefix = stream.read(4096)
-                    encoding = structured_encoding(prefix)
-                    if encoding is None:
-                        if filename in MEMBERS:
-                            raise EvidenceError("A recognized configuration file contains invalid JSON.")
+                    encoding = text_encoding(prefix)
+                    text = prefix.decode(encoding, errors="replace")
+                    is_json = text.lstrip().startswith(("{", "["))
+                    try:
+                        csv_header = None if is_json else azure_csv_header(text.partition("\n")[0])
+                    except EvidenceError as exc:
+                        if not recover_members:
+                            raise
                         skipped += 1
-                        decisions.append((index, "Skipped", "Not recognized as structured JSON"))
+                        decisions.append((index, "Skipped", str(exc)))
+                        continue
+                    if not is_json and csv_header is None:
+                        reason = "Not recognized as structured JSON or Azure inventory CSV"
+                        if filename in MEMBERS:
+                            if not recover_members:
+                                raise EvidenceError("A recognized configuration file contains invalid JSON.")
+                            reason = "Invalid JSON"
+                        skipped += 1
+                        decisions.append((index, "Skipped", reason))
                         continue
                     parsed_bytes += entry.file_size
                     if parsed_bytes > MAX_CONFIG_BYTES:
-                        raise EvidenceError(f"JSON files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
+                        raise EvidenceError(f"Structured files exceed {MAX_CONFIG_BYTES // MIB} MiB in total uncompressed. Split by assessment scope.")
                     raw = prefix + stream.read(MAX_MEMBER + 1 - len(prefix))
                 imported = set()
                 omitted = set()
-                for document, reason in json_documents(raw, encoding):
+                try:
+                    documents = ((azure_csv_document(raw, csv_header, encoding), None),) if csv_header else json_documents(raw, encoding)
+                except EvidenceError as exc:
+                    if not recover_members:
+                        raise
+                    skipped += 1
+                    decisions.append((index, "Skipped", str(exc)))
+                    continue
+                for document, reason in documents:
                     if reason is not None:
                         omitted.add(reason)
                         continue
-                    for match, reason in configuration_records(document, filename == "conditionalAccessPolicies.json"):
+                    records = configuration_records(document, filename == "conditionalAccessPolicies.json")
+                    while True:
+                        try:
+                            match, reason = next(records)
+                        except StopIteration:
+                            break
+                        except EvidenceError as exc:
+                            if not recover_members:
+                                raise
+                            omitted.add(str(exc))
+                            break
                         if match is not None:
                             name, body = match
                             add_configuration(config, name, body)
@@ -512,7 +761,7 @@ def read_archive(source):
                         else:
                             omitted.add(reason)
                 if not imported:
-                    if filename in MEMBERS and omitted == {"Invalid JSON"}:
+                    if not recover_members and filename in MEMBERS and omitted == {"Invalid JSON"}:
                         raise EvidenceError("A recognized configuration file contains invalid JSON.")
                     skipped += 1
                     decisions.append((index, "Skipped", "; ".join(sorted(omitted or {"No supported records"}))))
