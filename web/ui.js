@@ -124,7 +124,7 @@ element("review").addEventListener("click", () => {
     return;
   }
   const categories = [];
-  categories.push("Only your uploaded ZIP is used. It is streamed to a temporary file in the approved local folder and closed after parsing. Only recognized configuration files are opened.");
+  categories.push("Only your uploaded ZIP is used. It is streamed to a temporary file in the approved folder on the assessment host and closed after parsing. Only recognized configuration files are opened.");
   categories.push("Foundry receives only allowlisted Azure and Entra setting values and temporary row numbers. It determines the findings. No ZIP, resource or principal IDs, names, logs, costs, or raw metrics are sent. Calls can incur costs and produce telemetry.");
   confirmRun({archive, revision}, categories);
 });
@@ -175,8 +175,8 @@ function showResult(reply) {
 }
 
 function startProgress() {
-  const steps = [["upload", "Receive ZIP on this device"], ["evidence", "Read configuration evidence"],
-    ["posture", "AI · Security Posture"], ["compliance", "AI · Compliance"], ["report", "Build the local report"]];
+  const steps = [["upload", "Receive ZIP on the assessment host"], ["evidence", "Read configuration evidence"],
+    ["posture", "AI · Security Posture"], ["compliance", "AI · Compliance"], ["report", "Build the report on the assessment host"]];
   const entries = new Map(steps.map(([id, label]) => {
     const item = document.createElement("li");
     const title = document.createElement("strong");

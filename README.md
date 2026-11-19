@@ -1,6 +1,6 @@
 # Azure Tenant Assessment with Microsoft Foundry
 
-This application reviews Azure configuration and security posture. It does not confirm or rule out a breach. The full assessment mandate is visible before a run. For an approved assessment, Foundry evaluates a minimal set of configuration indicators; ZIP files, identifiers, logs, and reports stay on the company-managed device. The application makes no Azure or Foundry calls before approval.
+This application reviews Azure configuration and security posture. It does not confirm or rule out a breach. The full assessment mandate is visible before a run. For an approved assessment, Foundry evaluates a minimal set of configuration indicators. The archive is handled on the company-approved assessment host, and no raw ZIP, identifiers, logs, or reports are sent to Foundry. The application makes no Azure or Foundry calls before approval.
 
 ## Run locally
 
@@ -24,7 +24,25 @@ Each report tab includes a **Review and closure checklist** for the relevant dom
 
 Each finding links directly to the relevant **Microsoft Learn** procedures. Each tab also includes scope-specific links with a short explanation of what to verify. **Security posture** explains how to interpret the supplied Entra settings before showing the underlying Graph rows. Reference URLs come from a fixed public Microsoft Learn catalog, not the uploaded archive or AI responses. They are exported to CSV and load only when clicked; the report opens them without sending its own URL as a referrer.
 
-**Assessment progress** shows upload, local ZIP validation, each AI agent's response, and report creation. Elapsed time is shown instead of an estimated percentage. If an agent fails, its stage shows the reason and the run does not fall back to an offline result.
+**Assessment progress** shows upload, ZIP validation on the assessment host, each AI agent's response, and report creation. Elapsed time is shown instead of an estimated percentage. If an agent fails, its stage shows the reason and the run does not fall back to an offline result.
+
+## Run on a managed assessment host
+
+Use this deployment when the workstation must not process the contents of the archive. Run the application on a company-managed host approved to receive the ZIP and store reports, not on the workstation. The workstation browser uploads the archive and displays the report. The host decompresses and validates the ZIP, prepares the allowlisted indicators, and writes the report. The approved Foundry deployment makes the assessment decisions. Do not send unfiltered archive contents directly to Foundry.
+
+On the approved Windows host, from the application directory, start the app on its existing loopback binding:
+
+```powershell
+python -B .\app.py --port 8765 --output 'C:\Company\AzureReview\Snapshots'
+```
+
+For single-user access, use authorized SSH port forwarding if your organization permits it, with port `8765` available on the workstation. Replace the example account and host with the approved ones. Use the same port on both sides so the application's Host and Origin checks continue to work:
+
+```powershell
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 'approved-account@approved-assessment-host'
+```
+
+Keep the tunnel open and use the exact session URL printed by the application, including its random path. Do not bind the Python server to a public interface. Set an approved local output directory on the managed host and use **Setup** to configure the approved Foundry deployment. Downloading or printing the report is a separate action that creates a copy on the workstation.
 
 ## Accepted ZIP format
 

@@ -217,8 +217,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.streaming = True
                     self.close_connection = True
-                self.progress("upload", "done", "ZIP received on this device.")
-                self.progress("evidence", "running", "Reading recognized configuration files locally.")
+                self.progress("upload", "done", "ZIP received on the assessment host.")
+                self.progress("evidence", "running", "Reading recognized configuration files on the assessment host.")
                 prepared_archive = read_archive(upload)
             self.progress("evidence", "done", "Archive validated. The temporary upload is closed.")
             status = {}
@@ -226,11 +226,11 @@ class Handler(BaseHTTPRequestHandler):
             def assess(batches):
                 nonlocal status
                 decisions, status, receipts = assess_evidence(connection, batches, self.progress)
-                self.progress("report", "running", "Writing the Foundry decisions to the local report.")
+                self.progress("report", "running", "Writing the Foundry decisions to the report.")
                 return decisions, status, receipts
 
             snapshot, summary = build.run(self.server.output, prepared_archive=prepared_archive, review_mode="model", assess=assess)
-            self.progress("report", "done", "Report and CSVs saved locally.")
+            self.progress("report", "done", "Report and CSVs saved on the assessment host.")
             self.payload(200, {"snapshot": snapshot, **summary,
                                "foundry_status": status, "preview": f"report/{snapshot}",
                                "download": f"download/{snapshot}"})
